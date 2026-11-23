@@ -35,7 +35,7 @@ DEFAULTS = {
                 "min_evidence": 5},
     "local": {"base_url": "http://127.0.0.1:11434", "model": None, "allow_remote": False},
     "budgets": {"global_monthly_usd": None, "classes": []},
-    "skills": {"match_threshold": 2},
+    "skills": {"match_threshold": 2, "docker_image": "python:3.12-slim"},
     "mcp": {"servers": []},
     "daemon": {"poll_seconds": 2},
     "gateways": {"cli": True},
@@ -53,8 +53,7 @@ model:
   name: null
 auxiliary: {}
 
-# Where the coordinator runs the commands it dispatches. Only "local" (this
-# machine's shell) is built. docker / ssh / sandbox arrive with chapter 11.
+# Where supervised cloud CLIs run. Native skills always use local Docker.
 terminal:
   backend: local
 
@@ -123,6 +122,7 @@ budgets:
 
 skills:
   match_threshold: 2        # how strongly a task must match a skill's summary
+  docker_image: python:3.12-slim  # pre-pull this image on your local engine
 
 # External tool servers this control plane knows about (chapter 9). A record,
 # not a connection: what it is, how it starts, what it may read and write.
@@ -217,9 +217,13 @@ def load() -> dict:
         raise ConfigError(f"approvals.mode must be one of {APPROVAL_MODES}, not {mode!r}")
     backend = cfg["terminal"].get("backend")
     if backend in BACKENDS_PLANNED:
-        raise ConfigError(f"terminal.backend '{backend}' is not built yet (chapter 11); use 'local'")
+        raise ConfigError(f"terminal.backend '{backend}' is not built yet for agent CLIs; "
+                          "use 'local'. Native skills use Docker separately.")
     if backend not in BACKENDS_BUILT:
         raise ConfigError(f"terminal.backend must be one of {BACKENDS_BUILT}, not {backend!r}")
+    image = cfg["skills"].get("docker_image") if isinstance(cfg["skills"], dict) else None
+    if not isinstance(image, str) or not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._:/@-]*", image):
+        raise ConfigError("skills.docker_image must be a Docker image name or digest reference")
     if cfg["routing"].get("untagged_privacy") not in PRIVACY:
         raise ConfigError(f"routing.untagged_privacy must be one of {PRIVACY}")
     for b in cfg["budgets"].get("classes") or []:

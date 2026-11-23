@@ -42,7 +42,6 @@ from pathlib import Path
 from typing import List, Optional
 
 from . import backends, config, memory, outcomes, state
-from .adapters.base import BASE_ENV, depth
 from .contract import EDIT, ERROR, OK, PRIVACY, READ, TIMEOUT, Result
 
 CATEGORIES = ("native", "delegation", "tool")
@@ -55,6 +54,15 @@ class SkillError(Exception):
 
 def root() -> Path:
     return config.home() / "skills"
+
+
+def _folder(name: str) -> Path:
+    if not name or Path(name).name != name or name in (".", ".."):
+        raise SkillError("use a skill name from the registry")
+    path = root() / name
+    if path.is_symlink() or root().is_symlink():
+        raise SkillError("skill folders must be real directories inside the registry")
+    return path
 
 
 def _lock_path() -> Path:
@@ -85,17 +93,32 @@ def names() -> List[str]:
 # --- loading level 2: summaries ---------------------------------------------------
 
 def content_hash(name: str) -> str:
+    return content_hash_at(_folder(name))
+
+
+def content_hash_at(base: Path) -> str:
     h = hashlib.sha256()
-    base = root() / name
-    for path in sorted(p for p in base.rglob("*") if p.is_file() and "__pycache__" not in p.parts):
-        h.update(path.relative_to(base).as_posix().encode() + b"\0" + path.read_bytes() + b"\0")
+    for path in sorted(base.rglob("*")):
+        if "__pycache__" in path.relative_to(base).parts:
+            continue
+        if path.is_symlink() or not (path.is_file() or path.is_dir()):
+            raise SkillError("skills must contain only regular files and folders")
+        if path.is_dir():
+            continue
+        h.update(path.relative_to(base).as_posix().encode() + b"\0")
+        with path.open("rb") as data:
+            for chunk in iter(lambda: data.read(1024**2), b""):
+                h.update(chunk)
+        h.update(b"\0")
     return h.hexdigest()
 
 
 def summary(name: str) -> dict:
     """A skill's declaration plus its trust status. Does not read the body."""
     import yaml
-    path = root() / name / "skill.yaml"
+    path = _folder(name) / "skill.yaml"
+    if path.is_symlink() or not path.is_file():
+        raise SkillError(f"missing regular manifest: {path}")
     try:
         spec = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     except (OSError, yaml.YAMLError) as e:
@@ -122,6 +145,7 @@ def summary(name: str) -> dict:
     else:
         spec["status"] = DRAFT
     spec["reviewed"] = entry.get("reviewed")
+    spec["reviewed_hash"] = entry.get("hash") if spec["status"] == TRUSTED else None
     return spec
 
 
@@ -201,34 +225,19 @@ def match(task: str, axes: dict, access: str, cfg: dict, forced: Optional[str] =
 
 # --- lifecycle ------------------------------------------------------------------------------
 
-def _clean_env(spec: dict, extra: Optional[dict] = None) -> dict:
-    wanted = list(BASE_ENV) + [str(n) for n in spec.get("required_environment_variables") or []]
-    env = {n: os.environ[n] for n in wanted if n in os.environ}
-    env["ORCHESTRA_DEPTH"] = str(depth() + 1)
-    env.update(extra or {})
-    return env
-
-
-def _argv(name: str, argv) -> List[str]:
-    """Paths inside the skill folder are given relative to it."""
-    if not isinstance(argv, list) or not argv:
-        raise SkillError(f"skill '{name}' declares no command")
-    base = root() / name
-    return [str(base / a) if (base / str(a)).is_file() else str(a) for a in argv]
-
-
-def run_test(name: str, timeout: int = 120) -> dict:
+def run_test(name: str, timeout: int = 120, expected_hash: Optional[str] = None) -> dict:
     spec = summary(name)
     if not spec.get("test"):
         return {"declared": False, "passed": None, "output": ""}
     try:
-        backends.check_floor(_argv(name, spec["test"]))
-        p = subprocess.run(_argv(name, spec["test"]), cwd=root() / name, capture_output=True,
-                           text=True, timeout=timeout, env=_clean_env(spec),
-                           stdin=subprocess.DEVNULL)
+        if spec["required_environment_variables"]:
+            raise SkillError("offline skill tests cannot use host environment variables")
+        folder = _folder(name)
+        p = backends.run_skill(spec["test"], skill_dir=folder, project=None, cwd=folder,
+                               timeout=timeout, expected_hash=expected_hash or content_hash(name))
         return {"declared": True, "passed": p.returncode == 0,
                 "output": (p.stdout + p.stderr).strip()[-2000:]}
-    except (OSError, subprocess.TimeoutExpired, backends.HardlineRefusal) as e:
+    except (OSError, SkillError, subprocess.TimeoutExpired, backends.HardlineRefusal) as e:
         return {"declared": True, "passed": False, "output": f"{type(e).__name__}: {e}"}
 
 
@@ -240,14 +249,19 @@ def trust(name: str, without_test: bool = False, by: str = "operator") -> dict:
         raise SkillError("write a description first: it is what tasks are matched against")
     if spec["category"] == "native" and not spec.get("run"):
         raise SkillError("a native skill needs a `run:` command")
-    tested = run_test(name)
+    if spec["category"] == "native" and spec["required_environment_variables"]:
+        raise SkillError("offline native skills cannot use host environment variables")
+    fingerprint = content_hash(name)
+    tested = run_test(name, expected_hash=fingerprint)
     if tested["declared"] and not tested["passed"]:
         raise SkillError(f"its own test fails, so it is not trusted:\n{tested['output']}")
     if not tested["declared"] and not without_test:
         raise SkillError("this skill declares no `test:`. Writing one is part of the review. "
                          "To trust it untested anyway, pass --without-test.")
+    if content_hash(name) != fingerprint:
+        raise SkillError("skill changed during review; review it again")
     lock = _lock()
-    lock[name] = {"status": TRUSTED, "version": str(spec["version"]), "hash": content_hash(name),
+    lock[name] = {"status": TRUSTED, "version": str(spec["version"]), "hash": fingerprint,
                   "reviewed": state.now(), "reviewed_by": by,
                   "test": "passed" if tested["declared"] else "none"}
     _save_lock(lock)
@@ -301,7 +315,7 @@ def new(name: str, category: str = "delegation") -> Path:
         "task_class: general\n"
         "access: read              # read | edit\n"
         "unattended: false         # may it run with nobody watching?\n"
-        "required_environment_variables: []   # the only variables its scripts will see\n"
+        "required_environment_variables: []   # offline skills receive only task metadata\n"
         + extra, encoding="utf-8")
     (path / "SKILL.md").write_text(
         f"# {name}\n\nTODO: when to use this, the inputs it expects, the steps, what it must "
@@ -327,7 +341,7 @@ class SkillRunner:
 
     location = "local"
     can_edit = False
-    sandboxed = False
+    sandboxed = True
     needs_inline_files = False
     auto_reads_context = True
     context_file = ""
@@ -347,13 +361,16 @@ class SkillRunner:
                  access: str = READ) -> Result:
         started = time.monotonic()
         elapsed = lambda: int((time.monotonic() - started) * 1000)
-        if self.spec["status"] != TRUSTED:  # re-checked at the moment of running
-            return Result(self.name, ERROR, error=f"skill is {self.spec['status']}, not trusted")
         try:
-            argv = _argv(self.skill, self.spec.get("run"))
-            env = _clean_env(self.spec, {"ORCHESTRA_TASK": brief, "ORCHESTRA_PROJECT": self.project,
-                                         "ORCHESTRA_FILES": "\n".join(self.files)})
-            proc = backends.get(config.load()).run(argv, cwd, timeout, env=env)
+            entry = _lock().get(self.skill) or {}
+            fingerprint = self.spec["reviewed_hash"]
+            if not fingerprint or entry.get("status") != TRUSTED or entry.get("hash") != fingerprint:
+                raise SkillError("skill needs a current trust record")
+            if self.spec["required_environment_variables"] or access != READ:
+                raise SkillError("offline native skills require read access and no host environment")
+            proc = backends.run_skill(self.spec.get("run"), skill_dir=_folder(self.skill),
+                                      project=Path(self.project), cwd=Path(cwd or self.project),
+                                      timeout=timeout, task=brief, files=self.files, expected_hash=fingerprint)
         except SkillError as e:
             return Result(self.name, ERROR, error=str(e), duration_ms=elapsed())
         except backends.HardlineRefusal as e:

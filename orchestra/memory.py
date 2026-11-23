@@ -208,12 +208,52 @@ def promote_to_core(ref: str) -> dict:
         raise MemoryError_("only a curated memory can be promoted; accept it first")
     path = config.home() / "MEMORY.md"
     existing = path.read_text(encoding="utf-8") if path.is_file() else ""
+    marker = f"<!-- orchestra-memory:{rec['id']} -->"
+    if marker in existing:
+        return rec
     if rec["summary"] in existing:
+        used = []
+        render_core(existing, used)
+        if rec["id"] in used:
+            return rec
         raise MemoryError_("MEMORY.md already contains this")
     with path.open("a", encoding="utf-8") as f:
-        f.write(("" if existing.endswith("\n") or not existing else "\n") + f"- {rec['summary']}\n")
+        f.write(("" if existing.endswith("\n") or not existing else "\n") +
+                f"- {rec['summary']} {marker}\n")
     state.audit("memory.promoted_to_core", memory_id=rec["id"])
     return rec
+
+
+def render_core(text: str, used: List[str]) -> str:
+    """Apply current review states without rewriting operator-authored Markdown."""
+    records = {r["id"]: r for r in load(include_legacy=False)}
+    lines = text.splitlines()
+    # 0.4.1 wrote an unmarked bullet and a promotion audit event. Only
+    # attribute a plain bullet if both pieces of evidence still exist.
+    legacy = {}
+    candidates = {f"- {r['summary']}": r["id"] for r in records.values() if "summary" in r}
+    audit = config.home() / "logs" / "audit.jsonl"
+    if candidates.keys() & set(lines) and audit.is_file():
+        with audit.open(encoding="utf-8") as events:
+            for line in events:
+                try:
+                    event = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(event, dict) and event.get("event") == "memory.promoted_to_core":
+                    rec = records.get(event.get("memory_id"))
+                    if rec and "summary" in rec and f"<!-- orchestra-memory:{rec['id']} -->" not in text:
+                        legacy[f"- {rec['summary']}"] = rec["id"]
+    rendered = []
+    for line in lines:
+        marker = re.search(r" <!-- orchestra-memory:([\w-]+) -->$", line)
+        ident = marker.group(1) if marker else legacy.pop(line, None)
+        if ident:
+            if records.get(ident, {}).get("state") != "curated":
+                continue
+            used.append(ident)
+        rendered.append(line[:marker.start()] if marker else line)
+    return "\n".join(rendered)
 
 
 def is_due(rec: dict) -> bool:

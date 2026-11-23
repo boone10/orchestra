@@ -35,12 +35,9 @@ A skill whose test fails cannot be trusted. A skill with no test needs
 
 ## The three classes
 
-- **native**: orchestra runs the skill's script itself, in the project
-  directory, with a stripped environment (only the variables the skill
-  declares). No model is involved, so it costs nothing and is allowed on any
-  privacy class. It may only read; the same git check that catches a
-  read-only agent editing files applies. This is what "act direct" means
-  when no local model is needed.
+- **Native skills** run locally and incur no model charge. Chapter 11 runs
+  them against read-only project snapshots in Docker. The same boundary
+  applies to manifest tests during review. [Runner and setup](chapter-11.md)
 - **delegation**: the body of `SKILL.md` goes into the brief as the procedure,
   and the skill may name a preferred agent. The router's privacy and stakes
   rules still apply to that choice.
@@ -70,6 +67,5 @@ Read them before trusting them, like any other skill.
 ## Not built from chapter 8
 
 Agents drafting skills from their own runs (8.10); a fixture harness beyond
-"run the declared test command"; running native skills inside a sandbox (they
-run on your machine as you, which is why trust is manual and pinned); the
+"run the declared test command"; the
 periodic registry review as a command (`skill list` shows use and failures).

@@ -187,7 +187,8 @@ def assemble(task: str, adapter, project: str, scope: List[str], cfg: dict,
             parts.append(text)
         sections.append((name, len(text or ""), remark))
 
-    core = state.bounded_memory()
+    core_ids = []
+    core = state.bounded_memory(core_ids)
     add("operator context (SOUL/MEMORY/USER)",
         "\n\n".join(["<operator-context>"] + [f"## {n}\n{t}" for n, t in core]
                     + ["</operator-context>"]) if core else None)
@@ -200,6 +201,7 @@ def assemble(task: str, adapter, project: str, scope: List[str], cfg: dict,
         add(f"procedure ({procedure[0]})", f"# Procedure (skill: {procedure[0]})\n{procedure[1]}")
 
     known, used = relevant(task, project, int(cfg["brief"]["memory_items"]), task_class)
+    used = list(dict.fromkeys(core_ids + used))
     add("what we already know",
         "# What we already know\nFrom this control plane's memory. Entries the operator "
         "confirmed are standing guidance; tentative entries and earlier runs are background.\n"

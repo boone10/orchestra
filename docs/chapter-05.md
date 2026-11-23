@@ -140,3 +140,17 @@ Skill declarations as files (Listing 5.2; the same information lives on each
 adapter until chapter 8), stopping a run already in progress, progress
 reporting from long runs, running tests as part of validation (13), and
 choosing the agent (6).
+
+## November 2026 outcome-log incident
+
+On November 19 the personal Mac's outcome log became empty in the same
+second a native skill finished. Shell history contains pasted terminal output
+whose old status footer would redirect output into the outcome log if
+interpreted by zsh. The history entry has no timestamp, so a pasted footer is
+the probable cause. On November 22 recovery restored all 42 audit completions
+and $2.2707 of recorded cost. Seven records lack the original task wording.
+The backup matched byte for byte, and repeating recovery added zero rows.
+
+Use `orchestra report --recover` to fill missing records from the audit log.
+Newer audit events omit task wording. The CLI prints saved paths in plain
+language so the status footer is safe to paste into a shell.

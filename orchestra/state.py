@@ -26,7 +26,7 @@ import os
 import re
 import stat
 from datetime import datetime, timezone
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 from . import config
 
@@ -89,13 +89,17 @@ def init() -> List[str]:
     return created
 
 
-def bounded_memory() -> List[Tuple[str, str]]:
+def bounded_memory(used: Optional[List[str]] = None) -> List[Tuple[str, str]]:
     """The always-in-context files, comments stripped, empty ones skipped."""
     out = []
     for name in BOUNDED:
         path = config.home() / name
         if path.is_file():
-            text = _COMMENT.sub("", path.read_text(encoding="utf-8", errors="replace")).strip()
+            text = path.read_text(encoding="utf-8", errors="replace")
+            if name == "MEMORY.md":
+                from . import memory
+                text = memory.render_core(text, used if used is not None else [])
+            text = _COMMENT.sub("", text).strip()
             if text:
                 out.append((name, text))
     return out
@@ -136,6 +140,7 @@ def describe() -> List[str]:
         lines.append(f"  config.yaml   {'present' if (root / 'config.yaml').is_file() else 'absent (defaults in use)'}"
                      f"   backend={cfg['terminal']['backend']}  approvals={cfg['approvals']['mode']}"
                      f"  default access={cfg['defaults']['access']}")
+        lines.append(f"  native skills and manifest tests   Docker, image={cfg['skills']['docker_image']}")
         if cfg["approvals"]["mode"] == "smart":
             lines.append("                smart approvals are not built; behaving as manual")
         if cfg["approvals"]["mode"] == "off":

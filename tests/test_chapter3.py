@@ -12,6 +12,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from tests import disable_live_providers
+
 from orchestra import cli, control, outcomes, workspace
 from orchestra.contract import EDIT, ERROR, OK
 
@@ -25,6 +27,7 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"claude say
 
 # Emits Codex-style JSON lines. With workspace-write it edits AND commits.
 FAKE_CODEX = """#!/bin/sh
+printf '%s\\n' "$@" > "$ORCHESTRA_HOME/codex-argv.txt"
 for last; do :; done
 write=no; for a; do [ "$a" = "workspace-write" ] && write=yes; done
 echo '{"type":"thread.started","thread_id":"t1"}'
@@ -54,6 +57,7 @@ class Chapter3Test(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         root = Path(self.tmp.name)
         self._env = dict(os.environ)
+        disable_live_providers(self)
         self.addCleanup(self._restore_env)
         os.environ["ORCHESTRA_CLAUDE_BIN"] = _exe(root / "fake-claude", FAKE_CLAUDE)
         os.environ["ORCHESTRA_CODEX_BIN"] = _exe(root / "fake-codex", FAKE_CODEX)
@@ -112,6 +116,11 @@ class Chapter3Test(unittest.TestCase):
         self.assertEqual(r.effects["commits_added"], 0)
         subprocess.run(["git", "checkout", "-q", "app.py"], cwd=self.repo, check=True)
         r = control.delegate("add docstring", agent="codex", cwd=str(self.repo), access=EDIT)
+        argv = (self.home / "codex-argv.txt").read_text().splitlines()
+        settings = [argv[i + 1] for i, item in enumerate(argv) if item == "-c"]
+        for setting in ("exclude_slash_tmp=true", "exclude_tmpdir_env_var=true",
+                        "writable_roots=[]", "network_access=false"):
+            self.assertIn("sandbox_workspace_write." + setting, settings)
         self.assertEqual((r.effects["commits_added"], r.effects["committed_files"]),
                          (1, ["app.py"]))
         self.assertEqual(outcomes.read_all()[-1]["effects"]["commits_added"], 1)

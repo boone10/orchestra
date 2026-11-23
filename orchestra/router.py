@@ -187,13 +187,14 @@ def classify(task: str, meta: Optional[dict], project: Optional[str], scope: Lis
         context = _axis("small", "inferred", "low")
 
     # Autonomy: declared, else from how the request arrived.
-    if "autonomy" in meta:
+    if source == "daemon":
+        autonomy = _axis("unattended", "source", "high", "picked up from the daemon spool")
+    elif "autonomy" in meta:
         autonomy = _axis(meta["autonomy"], by, "high")
     elif tags.get("autonomy") in AUTONOMY:
         autonomy = _axis(tags["autonomy"], "project", "high")
     else:
-        autonomy = _axis("unattended" if source == "daemon" else "supervised", "source", "high",
-                         f"arrived via {source}")
+        autonomy = _axis("supervised", "source", "high", f"arrived via {source}")
 
     if meta.get("task_class"):
         task_class = _axis(str(meta["task_class"]), by, "high")
@@ -296,6 +297,8 @@ def decide(axes: dict, access: str, cfg: dict, requested: Optional[str] = None,
         ok, why = allowed(adapter, privacy, task_class, cfg)
         if not ok:
             blocked.append(f"{name}: {why}")
+        elif adapter.location == "cloud" and autonomy != "supervised":
+            blocked.append(f"{name}: cloud agents require a supervised run on this machine")
         elif access == EDIT and not adapter.can_edit:
             blocked.append(f"{name}: cannot edit files")
         elif not adapter.available():
@@ -327,9 +330,6 @@ def decide(axes: dict, access: str, cfg: dict, requested: Optional[str] = None,
     elif context == "large" and cloud:
         executor = fit("large_context") or cloud[0]
         reasons.append("large context needs strong reasoning")
-    elif autonomy == "unattended" and cloud:
-        executor = next((n for n in cloud if adapters.REGISTRY[n].sandboxed), None) or cloud[0]
-        reasons.append("unattended run suits an agent that sandboxes itself")
     elif local:
         executor = local[0]
         reasons.append("small and bounded: handled on the local model")

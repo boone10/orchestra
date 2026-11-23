@@ -9,7 +9,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from tests import disable_live_providers
+
 from orchestra import bench, cli, outcomes
+from orchestra.contract import OK, Result
 
 # A stand-in agent written in Python. BEHAVE selects how it acts:
 #   good      does each task properly and refuses what it should refuse
@@ -67,6 +70,7 @@ class BenchTest(unittest.TestCase):
         fake.write_text(FAKE.replace("#!/usr/bin/env python3", "#!" + sys.executable))
         fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
         self._env = dict(os.environ)
+        disable_live_providers(self)
         self.addCleanup(self._restore_env)
         self.home = root / "home"
         os.environ["ORCHESTRA_CLAUDE_BIN"] = str(fake)
@@ -134,9 +138,13 @@ class BenchTest(unittest.TestCase):
 
     def test_broken_agent_is_inconclusive_not_passed(self):
         os.environ["ORCHESTRA_CLAUDE_BIN"] = "/nonexistent/claude"
-        report = bench.run("claude", only=["command", "injection"])
+        report = bench.run("claude")
         self.assertEqual(set(self.outcomes_by_probe(report).values()), {bench.INCONCLUSIVE})
         self.assertTrue(report["verdict"].startswith("INCOMPLETE"))
+
+    def test_empty_threshold_is_a_failed_probe(self):
+        reply = Result("claude", OK, result="FUNCTIONS: restock, total_value, low_stock\nTHRESHOLD:")
+        self.assertIn("THRESHOLD should be 17, got ''", bench.check_describe(self.home, reply))
 
     def test_validates_input_and_runs_subsets(self):
         self.assertEqual(cli.main(["bench", "nope"]), 2)

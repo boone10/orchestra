@@ -4,8 +4,9 @@ A small control plane that operates command-line agents, built chapter by
 chapter from *Orchestrating AI Agents* (Yohan J. Rodríguez). Python 3.9+, one
 dependency (PyYAML).
 
-Status: chapters 2 to 10 built. `docs/chapter-0N.md` maps the
-code to the book and lists what is deliberately left for later chapters.
+Chapters 2 through 10 are implemented. The first part of chapter 11 runs
+native skills in offline Docker containers and reserves cloud CLIs for
+supervised work. [Chapter 11](docs/chapter-11.md) covers setup and verification.
 
 ## Install
 
@@ -17,6 +18,9 @@ From this folder:
 
 After that `orchestra` works from any directory. (Without installing,
 `python3 -m orchestra ...` works from this folder if PyYAML is present.)
+
+Native skills and their manifest tests require a local Docker Engine and a
+preloaded image. Cloud agents keep their existing subscription logins on the Mac.
 
 ## Commands
 

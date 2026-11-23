@@ -10,6 +10,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from tests import disable_live_providers
+
 from orchestra import cli, config, control, outcomes, state, tasks
 from orchestra.contract import DENIED, EDIT, ERROR, OK, TIMEOUT
 
@@ -46,6 +48,7 @@ class Chapter5Test(unittest.TestCase):
         fake.write_text(FAKE.replace("#!/usr/bin/env python3", "#!" + sys.executable))
         fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
         self._env = dict(os.environ)
+        disable_live_providers(self)
         self.addCleanup(self._restore_env)
         self.home = root / "home"
         self.home.mkdir(exist_ok=True)
@@ -78,6 +81,18 @@ class Chapter5Test(unittest.TestCase):
         return len(path.read_text()) if path.exists() else 0
 
     # --- the brief -----------------------------------------------------------
+    def test_edit_from_symlinked_subdirectory_uses_private_copy(self):
+        subdir = self.repo / "src"
+        subdir.mkdir()
+        (subdir / "app.py").write_text("def top():\n    return 1\n")
+        alias = self.repo.parent / "project-alias"
+        alias.symlink_to(self.repo, target_is_directory=True)
+        before = (subdir / "app.py").read_bytes()
+        result = control.delegate("edit app.py", cwd=str(alias / "src"), access=EDIT, files=["app.py"])
+        self.assertEqual(result.gate, "pending", result.error)
+        self.assertEqual((subdir / "app.py").read_bytes(), before)
+        self.assertEqual(tasks.load_task(result.task_id)["files"], ["src/app.py"])
+
     def test_brief_carries_guidance_scope_and_task_last(self):
         (self.repo / "AGENTS.md").write_text("Use four spaces. Never touch vendor/.\n")
         r = control.delegate("add a docstring to top", cwd=str(self.repo), files=["app.py"])

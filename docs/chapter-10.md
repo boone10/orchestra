@@ -58,7 +58,9 @@ this machine (`local.base_url`, default `http://127.0.0.1:11434`) and uses
   `local.allow_remote` is set, because the privacy wall trusts that label.
 
 Check it with `orchestra agents -v`. It should say `local: available` and name
-the model. **This adapter has not been run against a real Ollama.**
+the model. The November 20 handoff records a successful local read run on
+the personal Mac. On November 22 a queued local read using `llama3.2:latest`
+returned the expected constant from a named fixture file and reached `done`.
 
 ## Budgets
 

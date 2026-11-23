@@ -10,8 +10,13 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
+
+from tests import disable_live_providers
 
 from orchestra import backends, cli, config, control, outcomes, spool, state, tasks
+from orchestra.adapters.claude import ClaudeAdapter
+from orchestra.adapters.local import LocalAdapter
 from orchestra.contract import DENIED, EDIT, ERROR, OK
 
 # Records the exact prompt it was given, and edits when allowed to.
@@ -26,6 +31,12 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"done","tot
 """
 
 
+def run_fixture_daemon():
+    # The fixture is a local shell script using the Claude reply format.
+    with patch.object(ClaudeAdapter, "location", "local"), patch.object(LocalAdapter, "models", return_value=[]):
+        spool.run()
+
+
 class Chapter4Test(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -35,6 +46,7 @@ class Chapter4Test(unittest.TestCase):
         fake.write_text(FAKE_CLAUDE)
         fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
         self._env = dict(os.environ)
+        disable_live_providers(self)
         self.addCleanup(self._restore_env)
         self.home = root / "home"
         os.environ["ORCHESTRA_CLAUDE_BIN"] = str(fake)
@@ -247,6 +259,7 @@ class Chapter4Test(unittest.TestCase):
         self.assertIn("hardline floor", failure.error)
 
     # --- daemon and spool ---------------------------------------------------
+    @patch.object(ClaudeAdapter, "location", "local")
     def test_submit_run_and_read_back(self):
         req = spool.submit("look around", cwd=str(self.repo))
         self.assertEqual(req["status"], "pending")
@@ -258,6 +271,7 @@ class Chapter4Test(unittest.TestCase):
         self.assertEqual(spool.work_once(log=lambda m: None), 0)  # not run twice
         self.assertEqual(self.launches(), 1)
 
+    @patch.object(ClaudeAdapter, "location", "local")
     def test_edit_request_lands_in_needs_review(self):
         req = spool.submit("change it", cwd=str(self.repo), access=EDIT)
         spool.work_once(log=lambda m: None)
@@ -282,13 +296,15 @@ class Chapter4Test(unittest.TestCase):
         self.assertEqual(cli.main(["submit", "x", "--cwd", "/no/such/dir"]), 2)
         self.assertEqual(spool.all_requests(), [])
 
+    @patch.object(ClaudeAdapter, "location", "local")
     def test_restart_does_not_rerun_interrupted_work(self):
         """Book 4.14: kill the daemon mid-job; it must restart cleanly, not
         silently duplicate the job, and leave a record explaining it."""
         req = spool.submit("slow job", cwd=str(self.repo))
         waiting = spool.submit("next job", cwd=str(self.repo))
         root = str(Path(__file__).resolve().parents[1])
-        daemon = subprocess.Popen([sys.executable, "-m", "orchestra", "daemon"], cwd=root,
+        daemon = subprocess.Popen([sys.executable, "-c", "from tests.test_chapter4 import run_fixture_daemon; "
+                                   "run_fixture_daemon()"], cwd=root,
                                   env=dict(os.environ, PYTHONPATH=root),
                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         try:

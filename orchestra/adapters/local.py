@@ -17,8 +17,8 @@ What makes this adapter different from the others:
 "Local" is enforced, not assumed: the base URL must point at this machine
 unless local.allow_remote is set, because the privacy wall trusts this label.
 
-Written from Ollama's documented OpenAI-compatible API. NOT YET OBSERVED
-against a real Ollama install from this project.
+Written from Ollama's documented OpenAI-compatible API. The project handoff
+records a successful read run on the personal Mac.
 """
 
 from __future__ import annotations
@@ -53,7 +53,7 @@ class LocalAdapter(Adapter):
         "context_file": "none; orchestra supplies the files you name",
         "edit_model": "cannot edit",
         "best_for": "cheap, private, routine work: summarise, classify, extract",
-        "claim": "vendor docs; not yet observed here",
+        "claim": "observed 2026-11-22: a queued read with llama3.2:latest returned the value from a named file",
     }
 
     def _settings(self) -> dict:

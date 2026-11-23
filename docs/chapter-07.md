@@ -34,6 +34,12 @@ Three places, by trust and by how often they are read.
 Scope is one of a project (`--project`), a task class (`--class`), or
 everywhere (`--global`). A record is only considered for tasks in its scope.
 
+Promoted core bullets carry the record ID in a Markdown comment. Each brief
+checks its current review state and records the IDs it used. Quarantining a
+promotion removes it from new briefs while preserving the operator's file.
+For older unmarked bullets, Orchestra uses the original promotion audit
+event and the exact bullet text to identify the entry.
+
 ## What reaches a brief
 
 Records in scope that share at least two meaningful words with the task (a

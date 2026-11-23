@@ -68,7 +68,7 @@ class ClaudeAdapter(Adapter):
                  "when launched with no flags, so orchestra states the tool list itself. "
                  "With explicit lists: read left the tree untouched, edit changed files "
                  "without committing but also wrote outside its folder, so runs now use "
-                 "--restricted (containment not yet re-observed)",
+                 "--restricted. On 2026-11-22 Claude Code 2.1.329 passed all six probes.",
     }
 
     def delegate(self, brief: str, cwd: Optional[str] = None, timeout: int = 600,

@@ -7,9 +7,14 @@ durable trace the next run can read.
 
 from __future__ import annotations
 
+import fcntl
 import json
+import os
 import shutil
 import sys
+import tempfile
+from collections import Counter
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional
@@ -30,7 +35,27 @@ def backup_path() -> Path:
     return home() / "outcomes.jsonl.bak"
 
 
+@contextmanager
+def _locked():
+    # The directory has a stable inode even when one of the logs is restored.
+    root = home()
+    root.mkdir(parents=True, exist_ok=True)
+    fd = os.open(root, os.O_RDONLY)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
+
+
 def guard() -> Optional[dict]:
+    if not home().exists():
+        return None
+    with _locked():
+        return _guard()
+
+
+def _guard() -> Optional[dict]:
     """Keep the outcome log from being lost quietly.
 
     Every line is written to the log and to a second copy beside it. The log
@@ -46,7 +71,7 @@ def guard() -> Optional[dict]:
         main_size = main.stat().st_size if main.exists() else 0
         bak_size = bak.stat().st_size if bak.exists() else 0
         if bak_size > main_size:
-            shutil.copyfile(bak, main)
+            _replace_from(bak, main)
             info = {"restored_bytes": bak_size, "was_bytes": main_size}
             from . import state  # late: keep this module importable on its own
             state.audit("outcomes.restored", **info)
@@ -55,19 +80,37 @@ def guard() -> Optional[dict]:
             return info
         if main_size > bak_size:
             bak.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(main, bak)  # first run with a copy, or the copy fell behind
+            _replace_from(main, bak)  # first run with a copy, or the copy fell behind
     except OSError:
         pass  # a guard must never be the reason a run fails
     return None
 
 
+def _replace_from(source: Path, target: Path) -> None:
+    with tempfile.NamedTemporaryFile(dir=target.parent, delete=False) as tmp:
+        path = Path(tmp.name)
+    try:
+        shutil.copyfile(source, path)
+        os.replace(path, target)
+    finally:
+        path.unlink(missing_ok=True)
+
+
 def append_raw(entry: dict) -> None:
     """Append one line to the log and to its copy."""
-    guard()
-    line = json.dumps(entry, ensure_ascii=False) + "\n"
+    with _locked():
+        _guard()
+        _append(entry)
+
+
+def _append(entry: dict) -> None:
+    line = (json.dumps(entry, ensure_ascii=False) + "\n").encode("utf-8")
     for path in (log_path(), backup_path()):
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as f:
+        with path.open("a+b") as f:
+            if f.tell():
+                f.seek(-1, os.SEEK_END)
+                if f.read(1) != b"\n":
+                    f.write(b"\n")  # keep a torn tail separate from this valid record
             f.write(line)
 
 
@@ -124,7 +167,14 @@ def record(result: Result, brief: str, cwd: Optional[str] = None, **fields) -> d
 
 
 def read_all() -> List[dict]:
-    guard()
+    if not home().exists():
+        return []
+    with _locked():
+        return _read_all()
+
+
+def _read_all() -> List[dict]:
+    _guard()
     path = log_path()
     if not path.exists():
         return []
@@ -173,44 +223,58 @@ def recover_from_audit() -> List[dict]:
     """
     path = home() / "logs" / "audit.jsonl"
     if not path.is_file():
+        guard()
         return []
-    have_ids = {e.get("task_id") for e in read_all() if e.get("task_id")}
-    have_times = {(e.get("ts"), e.get("agent")) for e in read_all() if not e.get("task_id")}
-    received, routed, added = None, {}, []
+    with _locked():
+        return _recover(path)
+
+
+def _recover(path: Path) -> List[dict]:
+    existing = _read_all()
+    have_ids = {(e["task_id"], e.get("attempt", 1)) for e in existing if e.get("task_id")}
+    have_times = Counter((e.get("ts"), e.get("agent")) for e in existing if not e.get("task_id"))
+    received, routed, attempts, added = {}, {}, {}, []
     for line in path.read_text(encoding="utf-8").splitlines():
         try:
             ev = json.loads(line)
         except ValueError:
             continue
-        kind = ev.get("event")
+        if not isinstance(ev, dict):
+            continue
+        kind, tid = ev.get("event"), ev.get("task_id")
+        request = tid or ev.get("request_id")
         if kind == "request.received":
-            received = ev
+            received[request] = ev
         elif kind == "route.decided":
-            routed[ev.get("task_id")] = ev
+            routed[tid] = ev
+        elif kind == "run.started" and tid:
+            attempts[tid] = ev.get("attempt", 1)
         elif kind == "run.finished":
-            tid = ev.get("task_id")
-            # A task id identifies a run exactly. Runs from before task ids
-            # existed can only be told apart by when they finished.
-            if (tid in have_ids) if tid else ((ev.get("ts"), ev.get("agent")) in have_times):
+            attempt = ev.get("attempt", attempts.get(tid, 1))
+            key = (ev.get("ts"), ev.get("agent"))
+            if tid and (tid, attempt) in have_ids:
                 continue
-            same = received if received and received.get("task_id") == tid else None
-            cwd = (same or {}).get("cwd") or ev.get("cwd")
+            if not tid and have_times[key] > 0:
+                have_times[key] -= 1
+                continue
+            same = received.get(request, {})
+            if not request and (same.get("agent") != ev.get("agent") or same.get("cwd") != ev.get("cwd")):
+                same = {}
+            cwd = ev.get("cwd") or same.get("cwd")
             route = routed.get(tid) or {}
             entry = {
-                "ts": ev.get("ts"), "task_id": tid, "task_class": None, "project": cwd,
+                "ts": ev.get("ts"), "task_id": tid, "attempt": attempt, "task_class": None, "project": cwd,
                 "agent": ev.get("agent"), "access": ev.get("access"), "status": ev.get("status"),
                 "error": ev.get("error"), "cost_usd": ev.get("cost_usd"), "gate": ev.get("gate"),
                 "source": ev.get("source"), "request_id": ev.get("request_id"), "cwd": cwd,
                 "route": {"outcome": route.get("outcome"), "executor": route.get("executor"),
                           "reasons": route.get("reasons")} if route else None,
-                "brief": (same or {}).get("brief")
+                "brief": same.get("brief")
                 or "[recovered from the audit log; the task wording was not kept]",
                 "recovered": True,
             }
-            append_raw(entry)
+            _append(entry)
             if tid:
-                have_ids.add(tid)
-            else:
-                have_times.add((entry["ts"], entry["agent"]))
+                have_ids.add((tid, attempt))
             added.append(entry)
     return added

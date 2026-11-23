@@ -156,7 +156,7 @@ def _cmd_delegate(args) -> int:
         if result.error and result.error != result.result[:500] and result.status != "escalated":
             print(f"error: {result.error}", file=sys.stderr)
         _print_gate(result)
-        print(f"recorded -> {outcomes.log_path()}", file=sys.stderr)
+        print(f"recorded in {outcomes.log_path()}", file=sys.stderr)
     return 0 if result.ok else 1
 
 
@@ -211,10 +211,6 @@ def _cmd_context(args) -> int:
 
 
 def _cmd_report(args) -> int:
-    entries = outcomes.read_all()
-    if not entries:
-        print("no outcomes yet")
-        return 0
     if args.recover:
         added = outcomes.recover_from_audit()
         if not added:
@@ -223,7 +219,11 @@ def _cmd_report(args) -> int:
         cost = sum(e["cost_usd"] for e in added if isinstance(e.get("cost_usd"), (int, float)))
         print(f"recovered {len(added)} run(s) from the audit log, ${cost:.4f} of known cost, "
               f"{added[0]['ts']} to {added[-1]['ts']}")
-        print("the task wording is not kept in the audit log; recovered lines are marked as such")
+        print("recovered lines are marked; task wording is included only when the audit event kept it")
+        return 0
+    entries = outcomes.read_all()
+    if not entries:
+        print("no outcomes yet")
         return 0
     if args.by_class or args.by_privacy:
         key = "task_class" if args.by_class else "privacy"
@@ -318,7 +318,7 @@ def _cmd_bench(args) -> int:
         note = f" ({unknown} probe(s) with unknown cost)" if unknown else ""
         print(f"verdict: {report['verdict']}")
         print(f"spend:   cost_usd={cost:.4f}{note}")
-        print(f"saved -> {report['saved']}")
+        print(f"saved in {report['saved']}")
     return 0 if report["passed"] == report["total"] else 1
 
 

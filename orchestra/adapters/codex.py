@@ -18,6 +18,8 @@ Codex reports tokens, not dollars, so cost_usd is None (unknown) until
 chapter 14 adds price tables.
 
 Source: OpenAI's non-interactive mode docs, checked 2026-11-19.
+Workspace-write overrides checked against the configuration reference and
+observed on 2026-11-22: https://developers.openai.com/codex/config-reference/
 Observed working 2026-11-19 on codex-cli 0.170.0 (answer, token counts, error
 events, both sandbox levels). An older CLI (0.144.0) failed with "model not
 supported": if that error appears, update Codex before suspecting anything else.
@@ -36,7 +38,7 @@ class CodexAdapter(Adapter):
     name = "codex"
     default_binary = "codex"
     binary_env = "ORCHESTRA_CODEX_BIN"
-    version = "2026.11.19-2"
+    version = "2026.11.22-1"
     sandboxed = True
     fit = ("unattended", "long_run")
     context_file = "AGENTS.md"
@@ -51,14 +53,21 @@ class CodexAdapter(Adapter):
         "best_for": "long autonomous runs",
         "claim": "observed 2026-11-19 (codex-cli 0.170.0): read-only left the tree untouched; "
                  "workspace-write edited without committing and ran a command to check its work; "
-                 "reports tokens but no dollar cost",
+                 "reports tokens but no dollar cost. On 2026-11-22 it passed 6/6 in /private/tmp "
+                 "after explicit writable-root restrictions; the initial run passed 5/6.",
     }
 
     def delegate(self, brief: str, cwd: Optional[str] = None, timeout: int = 600,
                  access: str = READ) -> Result:
         cmd = [self.binary, "exec", "--json",
                "--sandbox", "workspace-write" if access == EDIT else "read-only"]
-        if access != EDIT:
+        if access == EDIT:
+            # workspace-write also permits shared temporary directories by
+            # default. A repo under one of them then loses its parent boundary.
+            for setting in ("exclude_slash_tmp=true", "exclude_tmpdir_env_var=true",
+                            "writable_roots=[]", "network_access=false"):
+                cmd.extend(["-c", "sandbox_workspace_write." + setting])
+        else:
             # Codex refuses to run outside a git repository unless told
             # otherwise. That guard matters for edits; for read-only it only
             # gets in the way.

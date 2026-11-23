@@ -83,7 +83,7 @@ def delegate(brief: str, agent: Optional[str] = None, cwd: Optional[str] = None,
         adapters.get(agent)  # an unknown name is the caller's mistake, not an outcome
     task_id = tasks.new_id()
     started = state.now()
-    cwd_abs = os.path.abspath(os.path.expanduser(cwd or "."))
+    cwd_abs = str(Path(cwd or ".").expanduser().resolve())
     git_root = workspace.project_root(cwd_abs) if os.path.isdir(cwd_abs) else None
     project = git_root or cwd_abs
     ids = dict(task_id=task_id, agent=agent or "unrouted", access=access, source=source,
@@ -99,7 +99,7 @@ def delegate(brief: str, agent: Optional[str] = None, cwd: Optional[str] = None,
         outcomes.record(result, logged_task, cwd=cwd_abs, finished=state.now(),
                         **dict(record, **extra))
         state.audit("run.finished", status=result.status, error=result.error,
-                    cost_usd=result.cost_usd, gate=result.gate, **ids)
+                    attempt=extra.get("attempt", 1), cost_usd=result.cost_usd, gate=result.gate, **ids)
         return result
 
     def refuse(status: str, why: str, **extra) -> Result:
@@ -154,7 +154,9 @@ def delegate(brief: str, agent: Optional[str] = None, cwd: Optional[str] = None,
     state.audit("route.decided", outcome=decision["outcome"], executor=decision["executor"],
                 reasons=decision["reasons"], **ids)
     if decision["executor"] is None:
-        if agent and not by_skill and not adapters.get(agent).available() \
+        if agent and not by_skill and (adapters.get(agent).location != "cloud"
+                                      or axes["autonomy"]["value"] == "supervised") \
+                and not adapters.get(agent).available() \
                 and router.allowed(adapters.get(agent), axes["privacy"]["value"],
                                    decision["task_class"], cfg)[0]:
             ids["agent"] = agent
@@ -172,6 +174,8 @@ def delegate(brief: str, agent: Optional[str] = None, cwd: Optional[str] = None,
     record.update(adapter_version=adapter.version, location=adapter.location)
 
     # --- the privacy wall, checked again where it is enforced (10.6) ----------
+    if adapter.location == "cloud" and (source == "daemon" or axes["autonomy"]["value"] != "supervised"):
+        return refuse(ESCALATED, "cloud agents require a supervised run on this machine")
     ok, why = router.allowed(adapter, axes["privacy"]["value"], decision["task_class"], cfg)
     if not ok:
         state.audit("privacy.blocked", privacy=axes["privacy"]["value"], why=why, **ids)
@@ -203,10 +207,11 @@ def delegate(brief: str, agent: Optional[str] = None, cwd: Optional[str] = None,
             return refuse(ERROR, "edit runs are reviewed before they land, which needs a git "
                                  f"repository. Run `git init` in {cwd_abs} and commit once.")
         try:
+            subdir = Path(cwd_abs).relative_to(Path(git_root).resolve())
             copy, baseline = tasks.prepare_copy(git_root, task_id)
-        except (tasks.TaskError, OSError) as e:
+        except (tasks.TaskError, OSError, ValueError) as e:
             return refuse(ERROR, f"could not prepare a private copy of the project: {e}")
-        run_cwd = str(copy / os.path.relpath(cwd_abs, git_root))
+        run_cwd = str(copy / subdir)
 
     # --- execute, validate, capture (5.4) -------------------------------------
     # Retries are deliberate and bounded (5.8): only read-only runs, only for
@@ -278,7 +283,7 @@ def route(brief: str, agent: Optional[str] = None, cwd: Optional[str] = None,
     access = access or cfg["defaults"]["access"]
     if agent:
         adapters.get(agent)
-    cwd_abs = os.path.abspath(os.path.expanduser(cwd or "."))
+    cwd_abs = str(Path(cwd or ".").expanduser().resolve())
     project = (workspace.project_root(cwd_abs) if os.path.isdir(cwd_abs) else None) or cwd_abs
     scope = tasks.resolve_scope(files, cwd_abs, project)
     axes = router.classify(brief, meta, project, scope, source, cfg)
@@ -321,7 +326,7 @@ def compare(brief: str, agents: List[str], cwd: Optional[str] = None,
     origin = (workspace.project_root(origin) if os.path.isdir(origin) else None) or origin
     tags = router.project_tags(origin)
     meta = dict(meta or {})
-    for key in ("privacy", "stakes"):
+    for key in ("privacy", "stakes", "autonomy"):
         if key not in meta and tags.get(key):
             meta[key] = tags[key]
             meta["declared_by"] = "project"

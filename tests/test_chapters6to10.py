@@ -13,6 +13,7 @@ import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from unittest.mock import patch
 
 from orchestra import (cli, config, control, mcp_server, memory, outcomes, router, skills,
                        spool, state, tasks)
@@ -71,6 +72,18 @@ class Base(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         root = Path(self.tmp.name)
+        # This chapter tests the shipped example's matching, trust and output.
+        # Chapter 11 independently exercises the Docker boundary.
+        def run_example(cmd, *, skill_dir, cwd, timeout, files=(), **kwargs):
+            self.assertEqual(cmd[0], "python3")
+            self.assertIn(cmd[1], ("scripts/check_links.py", "scripts/run.py"))
+            return subprocess.run([sys.executable, str(skill_dir / cmd[1]), *cmd[2:]],
+                                  cwd=cwd, env={"ORCHESTRA_FILES": "\n".join(files)},
+                                  capture_output=True, text=True, timeout=timeout)
+        runner = patch.object(skills.backends, "run_skill", side_effect=run_example)
+        runner.start()
+        self.addCleanup(runner.stop)
+
         self._env = dict(os.environ)
         self.addCleanup(self._restore_env)
         self.home = root / "home"
@@ -151,7 +164,7 @@ class RouterTest(Base):
         big = self.decide("refactor the billing module across the whole codebase", meta={"stakes": "low"})
         self.assertEqual((big["executor"], big["axes"]["context"]["value"]), ("claude", "large"))
         queued = self.decide(source="daemon")
-        self.assertEqual((queued["executor"], queued["outcome"]), ("codex", "delegate"))
+        self.assertEqual((queued["executor"], queued["outcome"]), (None, router.ESCALATE))
         self.assertEqual(self.decide(agent="codex")["executor"], "codex")   # the operator may overrule
         self.assertEqual(cli.main(["route", "look at app.py", "--cwd", str(self.repo)]), 0)
         self.assertEqual(self.launched(), [])                               # routing runs nothing
@@ -218,10 +231,27 @@ class RouterTest(Base):
         req = spool.submit("look at app.py", cwd=str(self.repo))
         spool.work_once(log=lambda m: None)
         done = spool.load(req["id"])
-        self.assertEqual((done["status"], done["agent"]), ("done", "codex"))   # unattended -> sandboxed
+        self.assertEqual(done["status"], "needs_human")
+        self.assertIn("supervised", done["result"]["error"])
+        self.assertEqual(self.launched(), [])
 
 
 class OutcomeLogTest(Base):
+    def test_cli_recovers_empty_log_and_interleaved_retries_once(self):
+        from concurrent.futures import ThreadPoolExecutor
+        for task, folder in (("a", "/a"), ("b", "/b")):
+            state.audit("request.received", task_id=task, cwd=folder)
+        for task, attempt in (("a", 1), ("b", 1), ("a", 2)):
+            state.audit("run.started", task_id=task, attempt=attempt)
+            state.audit("run.finished", task_id=task, agent="claude", status="ok")
+        outcomes.log_path().touch()
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            self.assertEqual(list(pool.map(lambda _: cli.main(["report", "--recover"]), range(2))), [0, 0])
+        self.assertEqual([(r["task_id"], r["attempt"], r["cwd"]) for r in outcomes.read_all()],
+                         [("a", 1, "/a"), ("b", 1, "/b"), ("a", 2, "/a")])
+        self.assertEqual(outcomes.log_path().read_bytes(), outcomes.backup_path().read_bytes())
+        self.assertEqual(outcomes.recover_from_audit(), [])
+
     def test_a_log_that_shrinks_is_restored_and_says_so(self):
         self.tag(privacy="P1")
         self.go("look at app.py")
@@ -415,6 +445,29 @@ class MemoryTest(Base):
         self.assertEqual(cli.main(["memory", "propose", "no scope given"]), 2)
         self.assertEqual(cli.main(["state"]), 0)
 
+    def test_quarantine_filters_new_and_legacy_core_promotions(self):
+        old = memory.add("prior system preference", "global", state_="curated")
+        new = memory.add("current system preference", "global", state_="curated")
+        core = self.home / "MEMORY.md"
+        core.write_text("Operator guidance\n- prior system preference\n")
+        state.audit("memory.promoted_to_core", memory_id=old["id"])
+        memory.promote_to_core(new["id"])
+        original = core.read_bytes()
+        self.go("inspect the readme")
+        self.assertEqual(set(outcomes.read_all()[-1]["memories_used"]), {old["id"], new["id"]})
+        for record in (new, old):
+            memory.set_state(record["id"], "quarantined")
+        self.go("inspect the readme")
+        prompt = (self.home / "prompt-claude.txt").read_text()
+        self.assertIn("Operator guidance", prompt)
+        self.assertNotIn("system preference", prompt)
+        self.assertEqual(core.read_bytes(), original)
+        memory.set_state(new["id"], "curated")
+        memory.promote_to_core(new["id"])
+        rendered = dict(state.bounded_memory())["MEMORY.md"]
+        self.assertEqual(rendered.count("current system preference"), 1)
+        self.assertNotIn("prior system preference", rendered)
+
 
 class SkillsTest(Base):
     def setUp(self):
@@ -453,6 +506,7 @@ class SkillsTest(Base):
 
     def test_editing_a_trusted_skill_revokes_its_trust(self):
         skills.trust("check-doc-links")
+        selected = skills.SkillRunner("check-doc-links", str(self.repo), [])
         script = skills.root() / "check-doc-links" / "scripts" / "check_links.py"
         script.write_text(script.read_text() + "\n# a small, innocent-looking change\n")
         self.assertEqual(skills.summary("check-doc-links")["status"], "modified")
@@ -462,6 +516,7 @@ class SkillsTest(Base):
         self.assertEqual(forced.status, ERROR)                                  # naming it does not help
         self.assertIn("review it again", forced.error)
         skills.trust("check-doc-links")
+        self.assertEqual(selected.delegate("old selection", cwd=str(self.repo)).status, ERROR)
         self.assertEqual(skills.summary("check-doc-links")["status"], "trusted")
         skills.deprecate("check-doc-links")
         self.assertEqual(self.go("check the docs for broken links").agent, "claude")

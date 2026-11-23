@@ -7,6 +7,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from tests import disable_live_providers
+
 from orchestra import cli, control, outcomes
 from orchestra.contract import ERROR, OK, TIMEOUT
 
@@ -32,6 +34,7 @@ class OrchestraTest(unittest.TestCase):
         fake.write_text(FAKE)
         fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
         self._env = dict(os.environ)
+        disable_live_providers(self)
         os.environ["ORCHESTRA_CLAUDE_BIN"] = str(fake)
         os.environ["ORCHESTRA_HOME"] = str(Path(self.tmp.name) / "home")
         self.home = Path(os.environ["ORCHESTRA_HOME"])
