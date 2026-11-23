@@ -1,0 +1,24 @@
+# A starting point for a LiteLLM proxy, should you later put Claude Code and
+# Codex behind one (book 10.5). UNVERIFIED: written from the book's description
+# and not run. Check every key against LiteLLM's current documentation.
+#
+# Orchestra does not use this file. With subscription logins the agents call
+# their providers directly; this only applies once they use API keys and a
+# base URL pointing at the proxy.
+
+model_list:
+  - model_name: routine              # local: summarise, classify, extract
+    litellm_params:
+      model: ollama/<your-local-model>
+      api_base: http://127.0.0.1:11434
+  - model_name: frontier             # cloud: hard reasoning
+    litellm_params:
+      model: anthropic/<model-id>
+      api_key: os.environ/ANTHROPIC_API_KEY
+
+litellm_settings:
+  max_budget: 60                     # USD over budget_duration
+  budget_duration: 30d
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
