@@ -11,6 +11,7 @@ substituted at load time and never written back.
 from __future__ import annotations
 
 import copy
+import math
 import os
 import re
 from pathlib import Path
@@ -37,7 +38,7 @@ DEFAULTS = {
     "budgets": {"global_monthly_usd": None, "classes": []},
     "skills": {"match_threshold": 2, "docker_image": "python:3.12-slim"},
     "mcp": {"servers": []},
-    "daemon": {"poll_seconds": 2},
+    "daemon": {"poll_seconds": 2, "workers": 1},
     "gateways": {"cli": True},
     "scheduler": {"enabled": False},
 }
@@ -131,11 +132,12 @@ mcp:
 
 daemon:
   poll_seconds: 2
+  workers: 1        # 1 to 8 concurrent queue workers
 
 gateways:
   cli: true         # the requests/ spool, written by `orchestra submit`
 
-# Not built. Unattended scheduling is the last capability to earn (chapter 12).
+# When enabled, the daemon enqueues due jobs registered with orchestra schedule.
 scheduler:
   enabled: false
 """
@@ -208,6 +210,9 @@ def load() -> dict:
             raise ConfigError(f"{path} must contain a mapping of settings")
         _merge(cfg, data)
     cfg = _substitute(cfg, load_secrets())
+    for section in DEFAULTS:
+        if not isinstance(cfg[section], dict):
+            raise ConfigError(f"{section} must be a mapping of settings")
 
     mode = cfg["approvals"].get("mode")
     if mode is False:
@@ -221,14 +226,31 @@ def load() -> dict:
                           "use 'local'. Native skills use Docker separately.")
     if backend not in BACKENDS_BUILT:
         raise ConfigError(f"terminal.backend must be one of {BACKENDS_BUILT}, not {backend!r}")
-    image = cfg["skills"].get("docker_image") if isinstance(cfg["skills"], dict) else None
+    image = cfg["skills"].get("docker_image")
     if not isinstance(image, str) or not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._:/@-]*", image):
         raise ConfigError("skills.docker_image must be a Docker image name or digest reference")
     if cfg["routing"].get("untagged_privacy") not in PRIVACY:
         raise ConfigError(f"routing.untagged_privacy must be one of {PRIVACY}")
-    for b in cfg["budgets"].get("classes") or []:
+    classes = cfg["budgets"].get("classes")
+    if classes is None:
+        classes = []
+    if not isinstance(classes, list) or any(not isinstance(b, dict) for b in classes):
+        raise ConfigError("budgets.classes must be a list of class budgets")
+    for b in classes:
         if b.get("on_exhaustion", "refuse") not in ("refuse", "downgrade_to_local"):
             raise ConfigError("budgets.classes[].on_exhaustion must be refuse or downgrade_to_local")
     if cfg["defaults"].get("access") not in ACCESS_LEVELS:
         raise ConfigError(f"defaults.access must be one of {ACCESS_LEVELS}")
+    workers = cfg["daemon"].get("workers")
+    if type(workers) is not int or not 1 <= workers <= 8:
+        raise ConfigError("daemon.workers must be an integer from 1 to 8")
+    poll = cfg["daemon"].get("poll_seconds")
+    try:
+        valid_poll = not isinstance(poll, bool) and math.isfinite(float(poll)) and float(poll) > 0
+    except (ValueError, TypeError, OverflowError):
+        valid_poll = False
+    if not valid_poll:
+        raise ConfigError("daemon.poll_seconds must be a finite positive number")
+    if type(cfg["scheduler"].get("enabled")) is not bool:
+        raise ConfigError("scheduler.enabled must be true or false")
     return cfg

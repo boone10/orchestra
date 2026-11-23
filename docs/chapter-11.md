@@ -129,7 +129,8 @@ both supervised CLIs.
 The system still needs inspection of individual tool actions inside cloud
 agents, smart approvals, fleet-wide shutdown and spend limits, revocation of
 active agent sessions, and credential rotation. The current timeout and
-resource limits apply to one skill process tree. Scheduling remains deferred.
+resource limits apply to one skill process tree. [Chapter 12](chapter-12.md)
+uses these controls for scheduled work.
 
 Docker's CLI and bind mount specifications describe the runtime options used
 here. [Docker run](https://docs.docker.com/reference/cli/docker/container/run/)

@@ -36,7 +36,7 @@ class TaskError(Exception):
 
 
 def new_id() -> str:
-    return "t-" + datetime.now().strftime("%Y%m%d-%H%M%S-") + secrets.token_hex(2)
+    return "t-" + datetime.now().strftime("%Y%m%d-%H%M%S-") + secrets.token_hex(12)
 
 
 def task_dir(task_id: str) -> Path:

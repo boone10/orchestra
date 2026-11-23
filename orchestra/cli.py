@@ -2,7 +2,7 @@
 
 Direct:   delegate | route | compare | context | bench
 Review:   review | apply | discard | note
-Daemon:   daemon | submit | requests | cancel | stop | resume
+Daemon:   daemon | submit | requests | trace | resolve | cancel | stop | resume | schedule
 Declare:  project (privacy and stakes of a folder)
 Memory:   memory | recall
 Skills:   skill
@@ -18,7 +18,7 @@ import sys
 from typing import List, Optional
 
 from . import (adapters, bench, config, control, mcp_server, memory, outcomes, router,
-               skills, spool, state, stop_switch, tasks, workspace)
+               scheduler, skills, spool, state, stop_switch, tasks, workspace)
 from .contract import ACCESS_LEVELS, AUTONOMY, CONTEXT, PRIVACY, STAKES
 
 
@@ -372,9 +372,10 @@ def _cmd_daemon(args) -> int:
 def _cmd_submit(args) -> int:
     req = spool.submit(args.brief, agent=args.agent, cwd=args.cwd, access=args.access,
                        timeout=args.timeout, files=args.file, meta=_meta(args),
+                       idempotency_key=args.idempotency_key, replay_safe=args.replay_safe,
                        **_skill_args(args))
     print(req["id"])
-    if not state.daemon_pid():
+    if req["status"] == "pending" and not state.daemon_pid():
         print("queued, but no daemon is running. Start one with: orchestra daemon",
               file=sys.stderr)
     return 0
@@ -386,8 +387,8 @@ def _cmd_requests(args) -> int:
         return 0
     reqs = spool.all_requests()
     if not args.all:
-        reqs = [r for r in reqs if r["status"] in spool.OPEN] + \
-               [r for r in reqs if r["status"] not in spool.OPEN][-args.last:]
+        closed = [r for r in reqs if r["status"] not in spool.OPEN]
+        reqs = [r for r in reqs if r["status"] in spool.OPEN] + (closed[-args.last:] if args.last > 0 else [])
         reqs.sort(key=lambda r: r["id"])
     if not reqs:
         print("no requests")
@@ -398,11 +399,56 @@ def _cmd_requests(args) -> int:
             brief = brief[:57] + "..."
         print(f"{r['id']}  {r['status']:<12} {str(r.get('agent') or 'router'):<7} {r['access']:<5} {brief}"
               + (f"\n    review: orchestra review {r.get('task_id')}" if r["status"] == "needs_review" else ""))
+        if r["status"] == "needs_human":
+            print(f"    {(r.get('result') or {}).get('error') or 'operator decision needed'}")
+            print(f"    orchestra resolve {r['id']} --reason \"your decision\"")
     return 0
 
 
 def _cmd_cancel(args) -> int:
     print(f"{spool.cancel(args.id)['id']} cancelled")
+    return 0
+
+
+def _cmd_trace(args) -> int:
+    for event in spool.trace(args.id):
+        print(json.dumps(event, ensure_ascii=False))
+    return 0
+
+
+def _cmd_resolve(args) -> int:
+    print(f"{spool.resolve(args.id, args.reason)['id']} resolved")
+    return 0
+
+
+def _cmd_schedule(args) -> int:
+    if args.action == "list":
+        cfg = config.load()
+        print("Scheduling " + ("enabled" if cfg["scheduler"]["enabled"] else "disabled"))
+        jobs = scheduler.list_jobs()
+        if not jobs:
+            print("No scheduled jobs.")
+        for job in jobs:
+            cadence = (f"every {job['every']}s" if job.get("every")
+                       else f"daily {job['daily']} {job['timezone']}")
+            status = "paused" if job["paused"] else f"next {job['next_due']}"
+            print(f"{job['name']}  {cadence}  {status}")
+        return 0
+    if args.action == "add":
+        job = scheduler.add(args.name, args.brief, every=args.every, daily=args.daily,
+                            timezone=args.timezone, cwd=args.cwd, agent=args.agent,
+                            access=args.access, files=args.file, timeout=args.timeout,
+                            meta=_meta(args), replay_safe=args.replay_safe, **_skill_args(args))
+        print(f"Added {job['name']}. Next due {job['next_due']}.")
+        if not config.load()["scheduler"]["enabled"]:
+            print(f"To enable scheduling, set scheduler.enabled to true in {config.home() / 'config.yaml'}.")
+        return 0
+    if args.action == "remove":
+        scheduler.remove(args.name)
+        print(f"Removed {args.name}.")
+        return 0
+    job = scheduler.pause(args.name) if args.action == "pause" else scheduler.resume(args.name)
+    print(f"{job['name']} {'paused' if job['paused'] else 'active'}.")
     return 0
 
 
@@ -731,6 +777,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     sm = sub.add_parser("submit", help="queue a task for the daemon; prints the request id")
     sm.add_argument("brief", help="the task, in plain language")
     sm.add_argument("--agent", help="name an agent instead of letting the router choose")
+    sm.add_argument("--idempotency-key", help="reuse the request ID when submitting the same work again")
+    sm.add_argument("--replay-safe", action="store_true", help="allow one crash retry for repeatable read-only work")
     _run_options(sm, output=False)
     sm.set_defaults(func=_cmd_submit)
 
@@ -739,6 +787,33 @@ def main(argv: Optional[List[str]] = None) -> int:
     rq.add_argument("--all", action="store_true", help="list every request")
     rq.add_argument("-n", "--last", type=int, default=5, help="finished requests to include")
     rq.set_defaults(func=_cmd_requests)
+
+    trace = sub.add_parser("trace", help="show a request's audit events in order as JSON lines")
+    trace.add_argument("id", help="request ID or a unique part of it")
+    trace.set_defaults(func=_cmd_trace)
+
+    resolve = sub.add_parser("resolve", help="record a human decision and close an escalated request")
+    resolve.add_argument("id", help="request ID or a unique part of it")
+    resolve.add_argument("--reason", required=True, help="how the operator handled the escalation")
+    resolve.set_defaults(func=_cmd_resolve)
+
+    schedule = sub.add_parser("schedule", help="manage recurring work for the daemon")
+    schedules = schedule.add_subparsers(dest="action", required=True)
+    schedules.add_parser("list", help="show recurring jobs and their next due times")
+    add = schedules.add_parser("add", help="register a recurring request")
+    add.add_argument("name", help="unique schedule name")
+    add.add_argument("brief", help="task to submit when due")
+    cadence = add.add_mutually_exclusive_group(required=True)
+    cadence.add_argument("--every", type=int, metavar="SECONDS", help="interval in seconds")
+    cadence.add_argument("--daily", metavar="HH:MM", help="daily local wall-clock time in the selected timezone")
+    add.add_argument("--timezone", default="UTC", help="IANA timezone for --daily (default UTC)")
+    add.add_argument("--agent", help="name an agent instead of letting the router choose")
+    add.add_argument("--replay-safe", action="store_true", help="allow one crash retry for repeatable read-only work")
+    _run_options(add, output=False)
+    for action in ("pause", "resume", "remove"):
+        subcommand = schedules.add_parser(action, help=f"{action} a recurring job")
+        subcommand.add_argument("name", help="schedule name")
+    schedule.set_defaults(func=_cmd_schedule)
 
     cn = sub.add_parser("cancel", help="withdraw a queued request before it starts")
     cn.add_argument("id", help="request id, or a unique part of it")

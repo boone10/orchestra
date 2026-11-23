@@ -6,7 +6,8 @@ dependency (PyYAML).
 
 Chapters 2 through 10 are implemented. Chapter 11 adds offline Docker skills,
 supervised cloud runs and an operator stop switch. [Chapter 11](docs/chapter-11.md)
-covers setup, verification and remaining work.
+covers setup and verification. [Chapter 12](docs/chapter-12.md) adds recurring
+jobs, duplicate protection and optional parallel queue workers.
 
 ## Install
 
@@ -64,6 +65,17 @@ Queue work for the daemon:
     orchestra submit "Audit the docs for broken links" --cwd ~/work/site
     orchestra requests  |  cancel <id>
 
+Schedule a daily Docker link check. Set `scheduler.enabled` to `true` in
+`~/.orchestra/config.yaml` and leave `orchestra daemon` running.
+
+    orchestra schedule add docs "Check Markdown links" --daily 09:00 --timezone America/Kentucky/Louisville --skill check-doc-links --cwd ~/throwaway
+    orchestra schedule list
+    orchestra schedule pause docs
+
+Use `orchestra trace <request-id>` to follow a job from submission to outcome.
+The daemon runs one job at a time by default. Set `daemon.workers` to two to
+let two reads run together. Queued edits run exclusively.
+
 To stop running Docker skills and hold queued work for this Orchestra home:
 
     orchestra stop
@@ -109,6 +121,7 @@ answer and diff for every delegation), `requests/`, `outcomes.jsonl`,
       bench.py             capability and safety probes for an agent
       backends.py          where commands run + the hardline floor
       spool.py             the daemon and its durable request spool
+      scheduler.py         recurring jobs, missed runs and overlap checks
       adapters/            one file per agent (claude, codex, local)
       workspace.py         what a run did to the tree, isolated copies, context files
       outcomes.py          outcomes log: record, read, summarize

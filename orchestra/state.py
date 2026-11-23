@@ -8,7 +8,7 @@ Layout of ~/.orchestra (or $ORCHESTRA_HOME):
   MEMORY.md        compact curated facts          } sent with every brief,
   USER.md          what is known about the operator } so it must stay small
   skills/          capability registry (chapter 8; empty for now)
-  cron/            scheduled jobs (chapter 12; nothing reads it yet)
+  cron/            recurring jobs and their next due times
   requests/        the daemon's durable spool, one JSON file per request
   tasks/           one folder per delegation: the brief sent, the answer,
                    and for edit runs the diff awaiting review
@@ -21,6 +21,7 @@ Layout of ~/.orchestra (or $ORCHESTRA_HOME):
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import re
@@ -119,9 +120,23 @@ def audit(event: str, **fields) -> None:
 
 def daemon_pid() -> int:
     """PID of the running daemon, or 0."""
-    path = config.home() / "daemon.pid"
+    root = config.home()
+    path = root / "daemon.pid"
     try:
+        # Older daemons only wrote a PID. With the chapter 12 lock, a
+        # recycled PID by itself is no longer evidence of a live daemon.
+        lock_file = root / "daemon.lock"
+        if lock_file.exists() and lock_file.stat().st_size:
+            with lock_file.open("rb") as lock:
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_SH | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    pass
+                else:
+                    return 0
         pid = int(path.read_text().strip())
+        if pid <= 0:
+            return 0
         os.kill(pid, 0)
         return pid
     except (OSError, ValueError):
@@ -195,20 +210,16 @@ def describe() -> List[str]:
     by_status = {}
     for sp in skill_registry.summaries():
         by_status[sp["status"]] = by_status.get(sp["status"], 0) + 1
-    jobs = [p for p in (root / "cron").iterdir() if p.is_file()] if (root / "cron").is_dir() else []
+    jobs = list((root / "cron").glob("*.json"))
     lines.append("skills/        " + (", ".join(f"{n} {s}" for s, n in sorted(by_status.items()))
                                       or "none   (orchestra skill examples)"))
-    lines.append(f"cron/          {len(jobs)} job file(s); the scheduler is not built, nothing fires   (chapter 12)")
+    scheduling = "enabled" if cfg and cfg["scheduler"]["enabled"] else "disabled"
+    lines.append(f"cron/          {len(jobs)} scheduled job(s), scheduling {scheduling}")
+    if cfg:
+        lines.append(f"workers        {cfg['daemon']['workers']} configured")
 
-    counts = {}
-    spool = root / "requests"
-    if spool.is_dir():
-        for path in spool.glob("*.json"):
-            try:
-                status = json.loads(path.read_text()).get("status", "?")
-            except (OSError, ValueError):
-                status = "unreadable"
-            counts[status] = counts.get(status, 0) + 1
+    from . import spool
+    counts = spool.status_counts()
     summary = ", ".join(f"{n} {s}" for s, n in sorted(counts.items())) or "none"
     lines.append(f"requests/      {summary}")
 

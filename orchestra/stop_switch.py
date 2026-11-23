@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import fcntl
 import os
+import uuid
 from contextlib import contextmanager
 
 from . import config, state
@@ -20,6 +21,16 @@ def is_stopped() -> bool:
     except FileNotFoundError:
         return False
     return True
+
+
+def generation() -> str:
+    """Identify the last operator stop, including after resume, under the dispatch lock."""
+    for name in ("STOPPED", "stop.generation"):
+        try:
+            return (config.home() / name).read_text(encoding="utf-8").strip()
+        except FileNotFoundError:
+            continue
+    return ""
 
 
 @contextmanager
@@ -54,7 +65,7 @@ def stop() -> int:
         marker = config.home() / "STOPPED"
         if not is_stopped():
             with marker.open("x", encoding="utf-8") as out:
-                out.write(state.now() + "\n")
+                out.write(uuid.uuid4().hex + "\n")
                 out.flush()
                 os.fsync(out.fileno())
             state.audit("dispatch.stopped")
@@ -82,6 +93,8 @@ def resume() -> bool:
         # A previous stop may have lost its connection to Docker or exited
         # mid-sweep. Confirm removal before admitting any new work.
         _cleanup()
-        (config.home() / "STOPPED").unlink()
+        # Remember the stop across resume so crash recovery can recognize
+        # an earlier claim the operator meant to interrupt.
+        (config.home() / "STOPPED").replace(config.home() / "stop.generation")
         state.audit("dispatch.resumed")
         return True
