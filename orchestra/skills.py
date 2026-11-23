@@ -41,7 +41,7 @@ import time
 from pathlib import Path
 from typing import List, Optional
 
-from . import backends, config, memory, outcomes, state
+from . import backends, config, memory, outcomes, state, stop_switch
 from .contract import EDIT, ERROR, OK, PRIVACY, READ, TIMEOUT, Result
 
 CATEGORIES = ("native", "delegation", "tool")
@@ -378,6 +378,8 @@ class SkillRunner:
                           duration_ms=elapsed())
         except subprocess.TimeoutExpired:
             return Result(self.name, TIMEOUT, error=f"no reply within {timeout}s", duration_ms=elapsed())
+        except stop_switch.Stopped:
+            raise  # the delegation lifecycle records an operator denial
         except OSError as e:
             return Result(self.name, ERROR, error=f"could not start the skill: {e}", duration_ms=elapsed())
         text = proc.stdout.strip()[:20000]

@@ -27,7 +27,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-from . import adapters, config, outcomes, router, skills, state, tasks, workspace
+from . import adapters, config, outcomes, router, skills, state, stop_switch, tasks, workspace
 from .adapters.base import depth
 from .contract import ACCESS_LEVELS, DENIED, EDIT, ERROR, ESCALATED, READ, TIMEOUT, Result
 
@@ -105,6 +105,10 @@ def delegate(brief: str, agent: Optional[str] = None, cwd: Optional[str] = None,
     def refuse(status: str, why: str, **extra) -> Result:
         return write_back(Result(ids["agent"], status, error=why, gate="not_required",
                                  route=record.get("route")), **extra)
+
+    if stop_switch.is_stopped():
+        return refuse(DENIED, str(stop_switch.Stopped()),
+                      logged_task="[withheld: stopped before the brief was checked]")
 
     # --- recursion guard (5.11) -------------------------------------------
     if depth() >= int(cfg["delegation"]["max_depth"]):
@@ -219,8 +223,14 @@ def delegate(brief: str, agent: Optional[str] = None, cwd: Optional[str] = None,
     attempts = 1 + (max(0, int(cfg["delegation"]["retries"])) if access == READ else 0)
     for attempt in range(1, attempts + 1):
         before = workspace.snapshot(run_cwd)
-        state.audit("run.started", attempt=attempt, brief_chars=len(assembled.text), **ids)
-        result = adapter.delegate(assembled.text, cwd=run_cwd, timeout=timeout, access=access)
+        try:
+            # Commit the attempt to the audit log under the same gate used
+            # by stop. Release it before waiting for the agent's answer.
+            with stop_switch.admission():
+                state.audit("run.started", attempt=attempt, brief_chars=len(assembled.text), **ids)
+            result = adapter.delegate(assembled.text, cwd=run_cwd, timeout=timeout, access=access)
+        except stop_switch.Stopped as e:
+            return refuse(DENIED, str(e), attempt=attempt)
         result.effects = workspace.effects(run_cwd, before)
         result.artifacts = artifacts
         result.route = decision
@@ -266,8 +276,11 @@ def delegate(brief: str, agent: Optional[str] = None, cwd: Optional[str] = None,
             # never does: that is the hard rule, and no setting reaches it.
             if valid and cfg["approvals"]["mode"] == "off" and decision["auto_apply_allowed"]:
                 try:
-                    tasks.apply(task_id, decided_by="approvals.mode=off")
+                    with stop_switch.admission():
+                        tasks.apply(task_id, decided_by="approvals.mode=off")
                     result.gate = "auto_applied"
+                except stop_switch.Stopped:
+                    state.audit("review.auto_apply_stopped", **ids)
                 except tasks.TaskError as e:
                     state.audit("review.apply_failed", error=str(e), **ids)
     return write_back(result, attempt=attempt)
@@ -333,6 +346,11 @@ def compare(brief: str, agents: List[str], cwd: Optional[str] = None,
     group = datetime.now().strftime("%Y%m%d-%H%M%S-") + secrets.token_hex(2)  # unique per run
     runs = []
     for name in agents:
+        if stop_switch.is_stopped():
+            # No workspace or delegation exists for this leg.
+            state.audit("compare.stopped", group=group, agent=name)
+            runs.append((Result(name, DENIED, error=str(stop_switch.Stopped()), gate="not_required"), ""))
+            continue
         copy = workspace.isolated_copy(cwd, outcomes.home() / "runs" / f"{group}-{name}")
         result = delegate(brief, agent=name, cwd=str(copy), timeout=timeout, access=access,
                           group=group, isolate=False, meta=meta, use_skills=False)

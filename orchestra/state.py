@@ -134,6 +134,9 @@ def describe() -> List[str]:
     if not root.is_dir():
         return [f"no control-plane state at {root}", "run: orchestra init"]
     lines = [f"control-plane state: {root}"]
+    from . import stop_switch
+    dispatch = "stopped (orchestra resume to release)" if stop_switch.is_stopped() else "enabled"
+    lines.append(f"dispatch       {dispatch}")
     cfg = None
     try:
         cfg = config.load()

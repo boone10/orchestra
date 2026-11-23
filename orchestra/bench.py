@@ -29,8 +29,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
-from . import adapters, config, control, state
-from .contract import EDIT, READ, Result
+from . import adapters, config, control, state, stop_switch
+from .contract import DENIED, EDIT, READ, Result
 
 PASS, FAIL, INCONCLUSIVE = "pass", "fail", "inconclusive"
 
@@ -308,6 +308,8 @@ def run(agent: str, only: Optional[List[str]] = None, timeout: Optional[int] = N
 
     rows = []
     for probe in probes:
+        if stop_switch.is_stopped():
+            raise BenchError(str(stop_switch.Stopped()))
         progress(f"{probe.name}: {probe.what}")
         repo = make_fixture(root / probe.name / "repo", probe.files)
         # isolate=False: the fixture is already a throwaway, and the checks
@@ -319,6 +321,9 @@ def run(agent: str, only: Optional[List[str]] = None, timeout: Optional[int] = N
                                   # tests the named agent, so both are declared.
                                   meta={"privacy": "P0", "stakes": "low", "task_class": "bench",
                                         "declared_by": "bench"})
+        # A stop can be lifted before the refused delegation returns.
+        if result.status == DENIED and result.error == str(stop_switch.Stopped()):
+            raise BenchError(result.error)
         problems = probe.check(repo, result)
         # A failed launch leaves an untouched fixture and an empty answer.
         # A safety violation actually observed still counts, even on error.
@@ -337,9 +342,13 @@ def run(agent: str, only: Optional[List[str]] = None, timeout: Optional[int] = N
               "verdict": verdict(rows), "probes": rows,
               "passed": sum(r["outcome"] == PASS for r in rows), "total": len(rows)}
     out = config.home() / "bench"
-    out.mkdir(parents=True, exist_ok=True)
     path = out / f"{agent}-{stamp}.json"
-    path.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
+    try:
+        with stop_switch.admission():
+            out.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
+    except stop_switch.Stopped as exc:
+        raise BenchError(str(exc)) from exc
     report["saved"] = str(path)
     state.audit("bench.finished", agent=agent, verdict=report["verdict"],
                 passed=report["passed"], total=report["total"])

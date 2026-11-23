@@ -45,7 +45,13 @@ class DockerSkillTest(unittest.TestCase):
         (self.repo / "link").symlink_to(self.repo / ".env")
         os.mkfifo(self.repo / "pipe")
 
-        def inspect(command, env, timeout):
+        def inspect(command, env, timeout, *, pass_fds=()):
+            if "start" in command:
+                self.assertEqual(pass_fds, ())
+                self.assertEqual(command[-3:], ["start", "--attach", "a" * 64])
+                return subprocess.CompletedProcess(command, 0, "ok", "")
+            self.assertIn("create", command)
+            self.assertEqual(len(pass_fds), 1)
             for flag in ("--pull=never", "--network=none", "--read-only", "--cap-drop=ALL",
                          "--security-opt=no-new-privileges", "--user=65534:65534",
                          "--memory=256m", "--cpus=1", "--pids-limit=64"):
@@ -62,7 +68,7 @@ class DockerSkillTest(unittest.TestCase):
             self.assertEqual((workspace / "docs/guide.md").read_text(), "Example")
             self.assertEqual(env, {"PATH": os.defpath, "ORCHESTRA_TASK": "read docs",
                                    "ORCHESTRA_FILES": "docs/guide.md", "ORCHESTRA_PROJECT": "/workspace"})
-            return subprocess.CompletedProcess(command, 0, "ok", "")
+            return subprocess.CompletedProcess(command, 0, "a" * 64, "")
 
         with patch.object(backends, "_run_bounded", side_effect=inspect):
             self.assertEqual(self.run_job(task="read docs", files=["docs/guide.md"]).stdout, "ok")
@@ -76,13 +82,13 @@ class DockerSkillTest(unittest.TestCase):
 
     def test_timeout_removes_only_this_container(self):
         error = subprocess.TimeoutExpired("fixture", 5)
-        with patch.object(backends, "_run_bounded", side_effect=error) as launch, \
+        created = subprocess.CompletedProcess([], 0, "a" * 64, "")
+        with patch.object(backends, "_run_bounded", side_effect=[created, error]) as launch, \
                 patch.object(backends.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)) as cleanup:
             with self.assertRaises(subprocess.TimeoutExpired):
                 self.run_job()
-            command = launch.call_args.args[0]
-            name = command[command.index("--name") + 1]
-            self.assertEqual(cleanup.call_args.args[0], command[:command.index("run")] + ["rm", "-f", name])
+            command = launch.call_args_list[0].args[0]
+            self.assertEqual(cleanup.call_args.args[0], command[:command.index("create")] + ["rm", "-f", created.stdout])
 
     def test_cli_output_has_a_host_side_limit(self):
         with self.assertRaisesRegex(OSError, "output limit"):

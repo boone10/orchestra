@@ -36,7 +36,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, List, Optional
 
-from . import adapters, config, control, state, tasks
+from . import adapters, config, control, state, stop_switch, tasks
 from .contract import ACCESS_LEVELS
 
 OPEN = ("pending", "running", "needs_review")
@@ -61,14 +61,19 @@ def _save(req: dict) -> dict:
     return req
 
 
+def _read_request(path: Path) -> Optional[dict]:
+    try:
+        req = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return req if isinstance(req, dict) and "id" in req else None
+
+
 def all_requests() -> List[dict]:
     out = []
     for path in sorted(_dir().glob("*.json")):
-        try:
-            req = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            continue
-        if isinstance(req, dict) and "id" in req:
+        req = _read_request(path)
+        if req is not None:
             out.append(req)
     return out
 
@@ -131,14 +136,14 @@ def submit(brief: str, agent: Optional[str] = None, cwd: Optional[str] = None,
 
 
 def cancel(request_id: str) -> dict:
-    """Withdraw a request that has not started. A running agent cannot be
-    stopped from here yet; stop the daemon (Ctrl-C) if you must."""
-    req = load(request_id)
-    if req["status"] != "pending":
-        raise SpoolError(f"request {req['id']} is {req['status']}; only pending requests can be cancelled")
-    req["status"] = "cancelled"
-    state.audit("request.cancelled", request_id=req["id"])
-    return _save(req)
+    """Withdraw a pending request, including while dispatch is stopped."""
+    with stop_switch.dispatch_change():
+        req = load(request_id)
+        if req["status"] != "pending":
+            raise SpoolError(f"request {req['id']} is {req['status']}; only pending requests can be cancelled")
+        req["status"] = "cancelled"
+        state.audit("request.cancelled", request_id=req["id"])
+        return _save(req)
 
 
 def close_review(request_id: Optional[str], status: str) -> None:
@@ -172,16 +177,25 @@ def recover(log: Callable[[str], None] = print) -> List[str]:
 def work_once(log: Callable[[str], None] = print) -> int:
     """One pass over the spool. Returns how many requests were run."""
     ran = 0
-    for req in all_requests():
-        if req["status"] != "pending":
+    for path in sorted(_dir().glob("*.json")):
+        candidate = _read_request(path)
+        if candidate is None or candidate.get("status") != "pending":
             continue
         try:
-            cfg = config.load()
+            config.load()
+            # Claim before releasing the stop gate. Once claimed, a request
+            # is never put back in pending: an admitted attempt may have run.
+            with stop_switch.dispatch_change():
+                if stop_switch.is_stopped():
+                    break
+                req = _read_request(path)
+                if req is None or req.get("status") != "pending":
+                    continue
+                req["status"] = "running"
+                _save(req)
         except config.ConfigError as e:
             log(f"configuration problem, not running anything: {e}")
             return ran
-        req["status"] = "running"
-        _save(req)
         log(f"{req['id']} routing ({req['access']}"
             + (f", agent named: {req['agent']}" if req.get("agent") else "") + ")")
         try:

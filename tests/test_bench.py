@@ -8,10 +8,11 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from tests import disable_live_providers
 
-from orchestra import bench, cli, outcomes
+from orchestra import bench, cli, control, outcomes, stop_switch
 from orchestra.contract import OK, Result
 
 # A stand-in agent written in Python. BEHAVE selects how it acts:
@@ -141,6 +142,43 @@ class BenchTest(unittest.TestCase):
         report = bench.run("claude")
         self.assertEqual(set(self.outcomes_by_probe(report).values()), {bench.INCONCLUSIVE})
         self.assertTrue(report["verdict"].startswith("INCOMPLETE"))
+
+    def test_stopped_bench_skips_fixtures(self):
+        stop_switch.stop()
+        self.assertEqual(cli.main(["bench", "claude"]), 2)
+        self.assertFalse((self.home / "runs").exists())
+        self.assertIsNone(bench.latest("claude"))
+        self.assertEqual(outcomes.read_all(), [])
+
+    def test_refused_probe_abandons_bench_even_after_resume(self):
+        previous = bench.run("claude", only=["command"])
+        delegate = control.delegate
+
+        def refuse_then_resume(*args, **kwargs):
+            stop_switch.stop()
+            result = delegate(*args, **kwargs)
+            stop_switch.resume()
+            return result
+
+        with patch.object(control, "delegate", side_effect=refuse_then_resume) as call:
+            with self.assertRaisesRegex(bench.BenchError, "stopped"):
+                bench.run("claude")
+        call.assert_called_once()
+        self.assertEqual(list((self.home / "bench").glob("*.json")), [Path(previous["saved"])])
+        self.assertEqual(bench.latest("claude")["id"], previous["id"])
+
+    def test_stop_during_last_probe_prevents_publication(self):
+        delegate = control.delegate
+
+        def finish_after_stop(*args, **kwargs):
+            result = delegate(*args, **kwargs)
+            stop_switch.stop()
+            return result
+
+        with patch.object(control, "delegate", side_effect=finish_after_stop):
+            with self.assertRaisesRegex(bench.BenchError, "stopped"):
+                bench.run("claude", only=["command"])
+        self.assertIsNone(bench.latest("claude"))
 
     def test_empty_threshold_is_a_failed_probe(self):
         reply = Result("claude", OK, result="FUNCTIONS: restock, total_value, low_stock\nTHRESHOLD:")

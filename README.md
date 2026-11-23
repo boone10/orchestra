@@ -4,9 +4,9 @@ A small control plane that operates command-line agents, built chapter by
 chapter from *Orchestrating AI Agents* (Yohan J. Rodríguez). Python 3.9+, one
 dependency (PyYAML).
 
-Chapters 2 through 10 are implemented. The first part of chapter 11 runs
-native skills in offline Docker containers and reserves cloud CLIs for
-supervised work. [Chapter 11](docs/chapter-11.md) covers setup and verification.
+Chapters 2 through 10 are implemented. Chapter 11 adds offline Docker skills,
+supervised cloud runs and an operator stop switch. [Chapter 11](docs/chapter-11.md)
+covers setup, verification and remaining work.
 
 ## Install
 
@@ -63,6 +63,15 @@ Queue work for the daemon:
     orchestra daemon                 # foreground; Ctrl-C to stop
     orchestra submit "Audit the docs for broken links" --cwd ~/work/site
     orchestra requests  |  cancel <id>
+
+To stop running Docker skills and hold queued work for this Orchestra home:
+
+    orchestra stop
+    orchestra state                  # shows whether dispatch is stopped
+    orchestra resume                 # lets the daemon pick up pending requests
+
+The stop survives daemon restarts. Already admitted cloud and Ollama runs can
+finish. A queued skill interrupted by the switch stays closed after resume.
 
 Know your agents and your spend:
 

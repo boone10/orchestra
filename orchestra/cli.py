@@ -2,7 +2,7 @@
 
 Direct:   delegate | route | compare | context | bench
 Review:   review | apply | discard | note
-Daemon:   daemon | submit | requests | cancel
+Daemon:   daemon | submit | requests | cancel | stop | resume
 Declare:  project (privacy and stakes of a folder)
 Memory:   memory | recall
 Skills:   skill
@@ -18,7 +18,7 @@ import sys
 from typing import List, Optional
 
 from . import (adapters, bench, config, control, mcp_server, memory, outcomes, router,
-               skills, spool, state, tasks, workspace)
+               skills, spool, state, stop_switch, tasks, workspace)
 from .contract import ACCESS_LEVELS, AUTONOMY, CONTEXT, PRIVACY, STAKES
 
 
@@ -336,6 +336,29 @@ def _cmd_init(args) -> int:
 
 def _cmd_state(args) -> int:
     print("\n".join(state.describe()))
+    return 0
+
+
+def _cmd_stop(args) -> int:
+    try:
+        removed = stop_switch.stop()
+    except (OSError, RuntimeError) as exc:
+        if stop_switch.is_stopped():
+            print(f"Dispatch stopped. Skill cleanup needs attention: {exc}. Retry orchestra stop.", file=sys.stderr)
+        else:
+            print(f"Could not stop dispatch: {exc}", file=sys.stderr)
+        return 1
+    print(f"Dispatch stopped. Removed {removed} skill container(s). Pending requests wait for orchestra resume.")
+    return 0
+
+
+def _cmd_resume(args) -> int:
+    try:
+        resumed = stop_switch.resume()
+    except OSError as exc:
+        print(f"Could not resume dispatch: {exc}", file=sys.stderr)
+        return 1
+    print("Dispatch resumed." if resumed else "Dispatch is already enabled.")
     return 0
 
 
@@ -695,6 +718,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     s = sub.add_parser("state", help="walk the state directory: what the control plane knows "
                                      "and may do (book 4.9)")
     s.set_defaults(func=_cmd_state)
+
+    stop = sub.add_parser("stop", help="stop running Docker skills and hold new work for this Orchestra home")
+    stop.set_defaults(func=_cmd_stop)
+    resume = sub.add_parser("resume", help="allow new work and release pending requests to the daemon")
+    resume.set_defaults(func=_cmd_resume)
 
     dm = sub.add_parser("daemon", help="run the coordinator in the foreground; Ctrl-C to stop")
     dm.add_argument("--once", action="store_true", help="work through the spool once and exit")

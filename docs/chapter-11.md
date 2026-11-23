@@ -9,7 +9,7 @@ read requests through the daemon.
 | --- | --- |
 | §11.3, listing 11.1, pp. 160–163 | `backends.run_skill()` launches a fresh container on a local Docker Engine. |
 | §§11.2, 11.4–11.6 | Manifest commands pass the existing hardline check. Reviewed skill content is pinned by hash. The router checks supervision and privacy before dispatch. |
-| §11.7 | Each skill has CPU, memory, process, output, and time limits. Orchestra requests removal of that container on timeout or interruption. |
+| §11.7, p. 166 | Each skill has CPU, memory, process, output, and time limits. The operator stop switch removes active native skill containers and holds pending requests until resume. |
 | §§11.8–11.9 | The audit and outcome logs capture delegation decisions. Interactive cloud work keeps the existing review-then-apply gate. |
 
 ## Running a skill
@@ -62,7 +62,46 @@ The only task metadata forwarded is the task, project path inside the
 container, and project-relative file list. Skills that declare a host
 environment dependency require a different implementation before they can run.
 
+## Operator stop and resume
+
+Run `orchestra stop` from another terminal. It closes admission for the
+current `ORCHESTRA_HOME` and removes that home's registered native skill
+containers, including manifest self-tests. Check `orchestra state` for
+dispatch status and `orchestra requests` for individual jobs. The daemon
+can stay running or restart while stopped. Newly submitted requests and
+requests still waiting in the spool stay pending.
+
+Run `orchestra resume` to release pending work. If Docker was unavailable
+during a stop, resume retries cleanup before releasing the queue. A claimed
+job interrupted by the operator is recorded as failed with the stop reason.
+After a daemon crash, recovery marks a previously running job interrupted.
+Both cases require a new submission to run the job again.
+
+If a daemon dies during a native skill, run `orchestra stop` before restarting
+it. The command can remove that home's orphaned container and staged input
+files even after their coordinator is gone.
+Cleanup identifies skills launched by this version through their home label
+and registration. A skill already running at upgrade time has neither.
+
+The switch gates new agent attempts, retries and automatic patch application.
+Already admitted supervised cloud runs and local Ollama calls can finish.
+An operator can still inspect and manually apply a patch or cancel an
+individual pending request. Each Orchestra home controls its own work.
+
 ## Verification on the personal Mac
+
+Two disposable Orchestra homes ran skills on the same Colima engine.
+Stopping the first home removed its running container. Its first request
+was recorded as failed and its second stayed pending across a daemon
+restart. A second stop removed zero containers. After resume the waiting
+request completed exactly once. The other home's original container ran
+to completion, and neither home had a container left at the end.
+
+A separate test killed the daemon while its Docker skill was running. A new
+`orchestra stop` process removed the orphaned container, its registration,
+and its staged input files before the daemon restarted. Recovery marked the
+first request interrupted. The second stayed pending until resume, then ran
+once.
 
 On November 22, 2026, a diagnostic inside the real container observed UID
 65534, zero effective capabilities, `NoNewPrivs=1`, and only loopback. The
@@ -88,10 +127,9 @@ both supervised CLIs.
 ## Remaining chapter work
 
 The system still needs inspection of individual tool actions inside cloud
-agents, smart approvals, a fleet-wide stop switch and spend limits, credential
-rotation, and testing of recovery after the coordinator is killed abruptly.
-The current timeout and limits apply to one skill process tree. Scheduling
-remains deferred.
+agents, smart approvals, fleet-wide shutdown and spend limits, revocation of
+active agent sessions, and credential rotation. The current timeout and
+resource limits apply to one skill process tree. Scheduling remains deferred.
 
 Docker's CLI and bind mount specifications describe the runtime options used
 here. [Docker run](https://docs.docker.com/reference/cli/docker/container/run/)

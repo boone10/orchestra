@@ -11,6 +11,8 @@ the safety strategy. The approval mode and (later) the sandbox do that work.
 from __future__ import annotations
 
 import csv
+import fcntl
+import hashlib
 import io
 import os
 import re
@@ -21,10 +23,11 @@ import subprocess
 import tempfile
 import time
 import uuid
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from typing import List, Optional, Sequence
 
-from . import config
+from . import config, stop_switch
 
 HARDLINE = [
     # Launching an agent with its own safety switched off.
@@ -79,15 +82,139 @@ def get(cfg: dict):
     return LocalBackend()
 
 
+def _local_sockets():
+    return (Path.home() / ".colima/orchestra/docker.sock", Path("/var/run/docker.sock"),
+            Path.home() / ".docker/run/docker.sock", Path.home() / ".colima/default/docker.sock")
+
+
 def _docker_socket() -> Path:
     # Pick an actual local socket. Docker contexts and DOCKER_HOST can point
     # at a remote engine, which would invalidate Orchestra's privacy decision.
-    for path in (Path.home() / ".colima/orchestra/docker.sock", Path("/var/run/docker.sock"),
-                 Path.home() / ".docker/run/docker.sock",
-                 Path.home() / ".colima/default/docker.sock"):
+    for path in _local_sockets():
         if path.is_socket():
             return path
     raise OSError("no local Docker Engine socket; start Docker Desktop or Colima")
+
+
+def _home_id() -> str:
+    return hashlib.sha256(os.fsencode(config.home().resolve())).hexdigest()
+
+
+def _skill_label() -> str:
+    return "io.orchestra.skill-home=" + _home_id()
+
+
+def _skill_containers(docker: List[str], name: Optional[str] = None) -> List[str]:
+    args = ["ps", "-aq", "--no-trunc", "--filter", "label=" + _skill_label()]
+    if name:
+        args.extend(["--filter", f"name=^/{re.escape(name)}$"])
+    reply = subprocess.run([*docker, *args], env={"PATH": os.defpath}, stdin=subprocess.DEVNULL,
+                           capture_output=True, text=True, timeout=10)
+    if reply.returncode:
+        raise OSError(f"cannot list Orchestra skill containers: {reply.stderr.strip()}")
+    ids = reply.stdout.split()
+    if any(not re.fullmatch("[0-9a-f]{64}", cid) for cid in ids):
+        raise OSError("Docker returned an invalid container ID")
+    return ids
+
+
+def _remove_container(docker: List[str], cid: str) -> bool:
+    reply = subprocess.run([*docker, "rm", "-f", cid], env={"PATH": os.defpath}, stdin=subprocess.DEVNULL,
+                           capture_output=True, text=True, timeout=15)
+    if not reply.returncode:
+        return True
+    if "no such container" in reply.stderr.lower():
+        return False
+    raise OSError(f"Docker could not confirm removal of {cid}: {reply.stderr.strip()}")
+
+
+def stop_skills() -> int:
+    """Sweep this home's containers while stop holds the exclusive admission lock."""
+    engines = {}
+    removed, failures = 0, []
+    for marker in (config.home() / "active-skills").glob("*.socket"):
+        try:
+            with marker.open(encoding="utf-8") as reg:
+                socket = Path(reg.read())
+                reapable = engines.setdefault(socket, [])
+                # No new create can enter now. Check the lock before the
+                # listing so a late orphan response can't escape that sweep.
+                try:
+                    fcntl.flock(reg, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    failures.append(f"{marker.stem}: Docker create is still in progress; "
+                                    "retry orchestra stop when the Docker client exits")
+                else:
+                    reapable.append(marker)
+        except FileNotFoundError:
+            continue  # a completed run removed its registration
+    if not engines:
+        return 0
+    binary = shutil.which("docker")
+    if not binary:
+        raise OSError("active skills are registered but the Docker CLI is unavailable")
+    # A run might have started on a different local engine before the current
+    # preferred socket appeared. Only use previously registered local sockets.
+    with tempfile.TemporaryDirectory(prefix="orchestra-docker-client-") as client:
+        for socket, markers in engines.items():
+            if socket not in _local_sockets():
+                failures.append("unrecognized Docker socket in active skill registration")
+                continue
+            docker = [binary, "--config", client, "--host", f"unix://{socket}"]
+            try:
+                ids = _skill_containers(docker)
+            except (OSError, subprocess.TimeoutExpired) as error:
+                failures.append(f"{socket}: {error}")
+                continue
+            before = len(failures)
+            for cid in ids:
+                try:
+                    removed += int(_remove_container(docker, cid))
+                except (OSError, subprocess.TimeoutExpired) as error:
+                    failures.append(f"{socket}: {error}")
+            if len(failures) == before:
+                for marker in markers:
+                    marker.unlink(missing_ok=True)
+    if failures:
+        raise OSError(f"removed {removed} container(s); cleanup unconfirmed on " + "; ".join(failures))
+    return removed
+
+
+@contextmanager
+def _skill_stage(socket: Path):
+    parent = config.home() / "docker-stage"
+    if socket.parent == Path.home() / ".colima/orchestra":
+        parent = Path.home() / ".orchestra/docker-stage"
+    with ExitStack() as cleanup:
+        with stop_switch.admission():
+            parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            stage = tempfile.TemporaryDirectory(prefix=f"skill-{_home_id()}-", dir=parent)
+            fd = os.open(stage.name, os.O_RDONLY | os.O_DIRECTORY)
+            cleanup.callback(os.close, fd)
+            cleanup.enter_context(stage)  # remove files before releasing their lock
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        yield Path(stage.name).resolve()
+
+
+def reap_abandoned_stages() -> None:
+    """Called under exclusive dispatch lock after container removal succeeds."""
+    prefix = f"skill-{_home_id()}-"
+    parents = {config.home() / "docker-stage", Path.home() / ".orchestra/docker-stage"}
+    for parent in parents:
+        for stage in parent.glob(prefix + "*"):
+            try:
+                fd = os.open(stage, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            except FileNotFoundError:
+                continue  # a finishing runner cleaned its files
+            try:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    continue  # a live coordinator owns this snapshot
+                if stage.exists():
+                    shutil.rmtree(stage)
+            finally:
+                os.close(fd)
 
 
 def _stage_tree(source: Path, dest: Path, *, skill: bool) -> None:
@@ -152,6 +279,8 @@ def run_skill(cmd: Sequence[str], *, skill_dir: Path, project: Optional[Path], c
               timeout: int, task: str = "", files: Sequence[str] = (),
               expected_hash: Optional[str] = None) -> subprocess.CompletedProcess:
     """Run a manifest command against read-only snapshots on a local engine."""
+    if stop_switch.is_stopped():
+        raise stop_switch.Stopped()
     if not isinstance(cmd, (tuple, list)) or not cmd or not all(isinstance(a, str) and a for a in cmd):
         raise OSError("a skill command must be a nonempty list of strings")
     check_floor(list(cmd))
@@ -171,14 +300,7 @@ def run_skill(cmd: Sequence[str], *, skill_dir: Path, project: Optional[Path], c
         except ValueError:
             raise OSError("skill working directory is outside the project") from None
 
-    # A dedicated Colima VM only needs this one read-only host mount.
-    if socket.parent == Path.home() / ".colima/orchestra":
-        parent = Path.home() / ".orchestra/docker-stage"
-    else:
-        parent = config.home() / "docker-stage"
-    parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="skill-", dir=parent) as temporary:
-        root = Path(temporary).resolve()
+    with _skill_stage(socket) as root:
         skill_copy = root / "skill"
         _stage_tree(skill_dir, skill_copy, skill=True)
         if expected_hash is not None:
@@ -196,7 +318,7 @@ def run_skill(cmd: Sequence[str], *, skill_dir: Path, project: Optional[Path], c
         client_config.mkdir()
         docker = [binary, "--config", str(client_config), "--host", f"unix://{socket}"]
         name = "orchestra-skill-" + uuid.uuid4().hex
-        command = [*docker, "run", "--rm", "--name", name, "--pull=never",
+        command = [*docker, "create", "--rm", "--name", name, "--label", _skill_label(), "--pull=never",
                    "--network=none", "--read-only", "--cap-drop=ALL",
                    "--security-opt=no-new-privileges", "--user=65534:65534",
                    "--memory=256m", "--memory-swap=256m", "--cpus=1", "--pids-limit=64",
@@ -213,15 +335,66 @@ def run_skill(cmd: Sequence[str], *, skill_dir: Path, project: Optional[Path], c
         argv = [str(Path("/skill") / a) if not Path(a).is_absolute()
                 and ".." not in Path(a).parts and (skill_copy / a).is_file() else a for a in cmd]
         command.extend(["--entrypoint", argv[0], image, *argv[1:]])
+        marker = config.home() / "active-skills" / (name + ".socket")
+        registered = False
+        cid = None
+        rejected = False
+        deadline = time.monotonic() + timeout
         try:
-            return _run_bounded(command, env, timeout)
-        except (OSError, subprocess.TimeoutExpired, KeyboardInterrupt) as error:
-            # Killing the CLI alone leaves its container running.
-            cleanup = subprocess.run([*docker, "rm", "-f", name], env={"PATH": os.defpath},
-                                     capture_output=True, text=True, timeout=15)
-            if cleanup.returncode and "no such container" not in cleanup.stderr.lower():
-                raise OSError(f"Docker could not confirm removal of {name}: {cleanup.stderr.strip()}") from error
-            raise
+            with stop_switch.admission():
+                marker.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+                tmp = marker.with_suffix(".tmp")
+                with tmp.open("x", encoding="utf-8") as reg:
+                    # Only create inherits this registration lock. Stop can
+                    # latch and sweep even if the coordinator dies and the
+                    # orphaned Docker client is still talking to its engine.
+                    fcntl.flock(reg, fcntl.LOCK_EX)
+                    reg.write(str(socket))
+                    reg.flush()
+                    tmp.replace(marker)
+                    registered = True
+                    created = _run_bounded(command, env, min(10, timeout), pass_fds=(reg.fileno(),))
+                if created.returncode:
+                    # A daemon rejection (e.g. missing image) has a definite
+                    # response. A transport failure can still be in flight.
+                    rejected = "error response from daemon:" in created.stderr.lower()
+                    return created
+                cid = created.stdout.strip()
+                if not re.fullmatch("[0-9a-f]{64}", cid):
+                    cid = None
+                    raise OSError("Docker create returned an invalid container ID")
+            # An intervening stop removes even a created-but-not-started ID.
+            # Docker cannot recreate a missing container with 'start'.
+            result = None
+            try:
+                result = _run_bounded([*docker, "start", "--attach", cid], {"PATH": os.defpath},
+                                      max(0.0, deadline - time.monotonic()))
+            finally:
+                # Even if attach times out, a stop that removed this job
+                # wins over a retry, including after a quick resume.
+                with stop_switch.admission():
+                    if not marker.exists():
+                        raise stop_switch.Stopped()
+                    if result is not None and result.returncode == 0:
+                        # A successfully attached run has exited and --rm reaps
+                        # it even if the runner dies after we drop this marker.
+                        marker.unlink()
+                        registered = False
+            return result
+        finally:
+            if registered and marker.exists():
+                # Even if the creating client lost its response, a label and
+                # exact-name lookup can find only this home's own container.
+                try:
+                    ids = [cid] if cid else _skill_containers(docker, name)
+                    for item in ids:
+                        _remove_container(docker, item)
+                except subprocess.TimeoutExpired as exc:
+                    raise OSError("Docker timed out confirming skill cleanup") from exc
+                # An unanswered create may still be settling in the engine.
+                # Keep that registration for a later sweep if no ID is visible.
+                if ids or rejected:
+                    marker.unlink(missing_ok=True)
 
 
 def _mount(source: Path, destination: str) -> str:
@@ -232,10 +405,11 @@ def _mount(source: Path, destination: str) -> str:
     return buf.getvalue().rstrip("\n")
 
 
-def _run_bounded(command: List[str], env: dict, timeout: int) -> subprocess.CompletedProcess:
+def _run_bounded(command: List[str], env: dict, timeout: float, *,
+                 pass_fds: Sequence[int] = ()) -> subprocess.CompletedProcess:
     """Stop at one MiB of combined output, including on the host side."""
     deadline = time.monotonic() + timeout
-    with subprocess.Popen(command, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+    with subprocess.Popen(command, env=env, pass_fds=pass_fds, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                           stderr=subprocess.PIPE) as process, selectors.DefaultSelector() as sel:
         buffers = [bytearray(), bytearray()]
         sel.register(process.stdout, selectors.EVENT_READ, buffers[0])
