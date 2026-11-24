@@ -4,6 +4,9 @@ A small control plane that operates command-line agents, built chapter by
 chapter from *Orchestrating AI Agents* (Yohan J. Rodríguez). Python 3.9+, one
 dependency (PyYAML).
 
+Moving between the desktop and laptop? Open the [project handoff](HANDOFF.md)
+for the current reading bookmark, setup commands, and Git workflow.
+
 Chapters 2 through 10 are implemented. Chapter 11 adds offline Docker skills,
 supervised cloud runs and an operator stop switch. [Chapter 11](docs/chapter-11.md)
 covers setup and verification. [Chapter 12](docs/chapter-12.md) adds recurring
